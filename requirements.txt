@@ -1,0 +1,7 @@
+# Core dependencies for the prototype and planned follow-on phases.
+openai
+pandas
+numpy
+matplotlib
+faiss-cpu
+streamlit

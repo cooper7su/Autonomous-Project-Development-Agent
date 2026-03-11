@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autonomous-project-development-agent"
+version = "0.4.0"
+description = "Phase1 to Phase4 prototype for an autonomous project development workflow."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai",
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "faiss-cpu",
+    "streamlit",
+]
+authors = [
+    { name = "cooper7su" },
+]
+keywords = ["autonomy", "agent", "project-management", "ml", "python"]
+
+[project.urls]
+Repository = "https://github.com/cooper7su/Autonomous-Project-Development-Agent"
+
+[project.scripts]
+apda = "autonomous_project_development_agent.main:cli_main"
+apda-phase1 = "autonomous_project_development_agent.main:cli_main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

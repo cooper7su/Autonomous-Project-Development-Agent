@@ -50,6 +50,19 @@
 | Managed loop control | Track decision traces, batch execution, retry events, and stop reasons. | `loop_control.py` | Extended `LoopState` |
 | Dashboard browsing | Visualize historical goals, task tree details, and latest task records. | `main.py` | Interactive browsing in Streamlit |
 
+## Phase5: Local Autonomy And Self-Optimization
+
+| Task | Description | Responsible Module | Deliverable |
+| --- | --- | --- | --- |
+| Goal memory enrichment | Extend local goal memory with complexity, parent/child tracking, and query interfaces. | `goal_framework.py` | Richer `memory_store.json` and memory queries |
+| Historical task memory | Persist task success, failure, retry, and duration statistics. | `result_analysis.py` | `task_history.json` |
+| Workflow history | Record summarized historical runs for later browsing. | `result_analysis.py`, `main.py` | `workflow_history.json` |
+| Heuristic task planning | Adjust task priorities and retry budgets using local task history. | `task_planning.py` | Phase5 heuristic task tree |
+| Sample local execution | Add deterministic safe Python task execution for Phase5 validation. | `executor.py` | Local sample execution artifact |
+| Placeholder local AI tasks | Simulate planning and review tasks without external APIs. | `executor.py` | Local placeholder planning/review artifacts |
+| Self-optimization loop | Track retry events, adaptive priorities, and richer scheduling decisions. | `loop_control.py` | Extended `LoopState` statistics |
+| Enhanced dashboard | Visualize memory usage, task success rates, retries, and historical runs. | `main.py` | Phase5 dashboard view |
+
 ## Completed Milestones
 
 1. Created a clean source layout under `src/`.
@@ -59,10 +72,11 @@
 5. Implemented a minimal Phase2 closed-loop workflow with structured persistence.
 6. Implemented a Phase3 memory-aware workflow with batched task execution and placeholder Codex/GPT routing.
 7. Implemented a Phase4 memory-aware review loop with versioned goals, task trees, and richer dashboard reporting.
+8. Implemented a Phase5 local-only autonomy workflow with task history, workflow history, heuristic planning, and self-optimization.
 
 ## Future Phases
 
-### Phase5: Managed Autonomy And Tool Expansion
+### Phase6: Managed Autonomy And Tool Expansion
 
 - Add richer scoring, self-check heuristics, and regression-style validation.
 - Add longer multi-step orchestration flows and policy controls.

@@ -1,4 +1,4 @@
-"""Package metadata and shared constants for Phase1 to Phase4."""
+"""Package metadata and shared constants for Phase1 to Phase5."""
 
 APP_NAME = "Autonomous Project Development Agent"
 PACKAGE_NAME = "autonomous_project_development_agent"
@@ -16,7 +16,12 @@ DEFAULT_PHASE4_GOAL = (
     "dependency-aware task tree, prepare safe autonomous implementation "
     "suggestions, and produce an iteration review package."
 )
-__version__ = "0.4.0"
+DEFAULT_PHASE5_GOAL = (
+    "Inspect a local project, reuse historical memory, generate a self-optimizing "
+    "task tree, execute safe local analysis tasks, and produce a local autonomy "
+    "review without external AI APIs."
+)
+__version__ = "0.5.0"
 
 PHASE1_MODULE_MAP = [
     (

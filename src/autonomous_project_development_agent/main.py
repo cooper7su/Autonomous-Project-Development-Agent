@@ -1,4 +1,4 @@
-"""CLI and Streamlit entry point for Phase1 to Phase4 workflows."""
+"""CLI and Streamlit entry point for Phase1 to Phase5 workflows."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ if __package__ in {None, ""}:
         DEFAULT_PHASE2_GOAL,
         DEFAULT_PHASE3_GOAL,
         DEFAULT_PHASE4_GOAL,
+        DEFAULT_PHASE5_GOAL,
         PACKAGE_NAME,
         PHASE1_MODULE_MAP,
         PHASE1_RUNTIME_DIRNAME,
@@ -42,6 +43,7 @@ if __package__ in {None, ""}:
         build_project_goal,
         load_memory_status,
         persist_goal_memory,
+        query_goal_memory,
         retrieve_memory_context,
     )
     from autonomous_project_development_agent.loop_control import (  # type: ignore
@@ -54,6 +56,12 @@ if __package__ in {None, ""}:
         AnalysisReport,
         analyze_task_result,
         build_final_report,
+        load_task_history,
+        load_workflow_history,
+        query_task_history,
+        query_workflow_history,
+        update_task_history,
+        update_workflow_history,
     )
     from autonomous_project_development_agent.task_planning import (  # type: ignore
         PlannedTask,
@@ -67,6 +75,7 @@ else:
         DEFAULT_PHASE2_GOAL,
         DEFAULT_PHASE3_GOAL,
         DEFAULT_PHASE4_GOAL,
+        DEFAULT_PHASE5_GOAL,
         PACKAGE_NAME,
         PHASE1_MODULE_MAP,
         PHASE1_RUNTIME_DIRNAME,
@@ -80,10 +89,21 @@ else:
         build_project_goal,
         load_memory_status,
         persist_goal_memory,
+        query_goal_memory,
         retrieve_memory_context,
     )
     from .loop_control import LoopState, apply_batch_to_loop, initialize_loop_state, select_ready_tasks
-    from .result_analysis import AnalysisReport, analyze_task_result, build_final_report
+    from .result_analysis import (
+        AnalysisReport,
+        analyze_task_result,
+        build_final_report,
+        load_task_history,
+        load_workflow_history,
+        query_task_history,
+        query_workflow_history,
+        update_task_history,
+        update_workflow_history,
+    )
     from .task_planning import PlannedTask, build_plan_payload, generate_task_plan, render_task_prompt
 
 
@@ -124,7 +144,7 @@ class Phase1TaskRunResult:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Create the CLI parser for Phase1 to Phase4 workflows."""
+    """Create the CLI parser for Phase1 to Phase5 workflows."""
     parser = argparse.ArgumentParser(
         description="CLI for the Autonomous Project Development Agent prototype."
     )
@@ -137,7 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument(
         "--status",
         action="store_true",
-        help="Print the latest Phase1 to Phase4 status summaries.",
+        help="Print the latest Phase1 to Phase5 status summaries.",
     )
     actions.add_argument(
         "--run-phase1",
@@ -165,6 +185,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execute the Phase4 autonomous workflow with memory, task trees, and review packaging.",
     )
     actions.add_argument(
+        "--run-phase5",
+        action="store_true",
+        help="Execute the Phase5 autonomous workflow with local memory, heuristic planning, and self-optimization.",
+    )
+    actions.add_argument(
         "--report",
         action="store_true",
         help="Show the latest persisted workflow final report.",
@@ -173,6 +198,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--memory-status",
         action="store_true",
         help="Show the stored memory state and vector-store placeholder entries.",
+    )
+    actions.add_argument(
+        "--memory-query",
+        action="store_true",
+        help="Query historical goal, task, and workflow memory using local matching rules.",
     )
     actions.add_argument(
         "--visualize",
@@ -790,13 +820,15 @@ def resolve_goal(
         "Phase2": DEFAULT_PHASE2_GOAL,
         "Phase3": DEFAULT_PHASE3_GOAL,
         "Phase4": DEFAULT_PHASE4_GOAL,
+        "Phase5": DEFAULT_PHASE5_GOAL,
     }.get(phase, DEFAULT_PHASE2_GOAL)
     priority = {
         "Phase2": "medium",
         "Phase3": "high",
         "Phase4": "critical",
+        "Phase5": "critical",
     }.get(phase, "medium")
-    enable_memory = phase in {"Phase3", "Phase4"}
+    enable_memory = phase in {"Phase3", "Phase4", "Phase5"}
 
     if goal_text:
         goal = build_project_goal(
@@ -861,6 +893,7 @@ def build_execution_context(
     *,
     phase: str,
     memory_state: dict[str, Any] | None,
+    task_history: dict[str, Any] | None,
     plan_payload: dict[str, Any],
 ) -> ExecutionContext:
     """Create the runtime execution context for one workflow batch."""
@@ -880,6 +913,7 @@ def build_execution_context(
         goal_version=goal.goal_version,
         prior_results=prior_results,
         memory_state=memory_state or {},
+        task_history=task_history or {},
         plan_summary=plan_payload,
         max_parallel_tasks=int(plan_payload.get("max_parallel_tasks", 2)),
     )
@@ -953,6 +987,8 @@ def print_workflow_report(report: dict[str, Any]) -> None:
     if statistics:
         print(f"- Completed batches: {statistics.get('completed_batches', 0)}")
         print(f"- Parallel task count: {statistics.get('parallel_task_count', 0)}")
+        print(f"- Task profiles: {statistics.get('task_profile_count', 0)}")
+        print(f"- Workflow runs: {statistics.get('workflow_run_count', 0)}")
 
     print("\nTask records:")
     for record in report.get("tasks", []):
@@ -977,6 +1013,10 @@ def print_memory_status(memory_status: dict[str, Any]) -> None:
     print(f"- Stored goals: {memory_status.get('goal_count', 0)}")
     print(f"- Vector placeholders: {memory_status.get('vector_count', 0)}")
     print(f"- Phase breakdown: {memory_status.get('phase_breakdown', {})}")
+    print(f"- Complexity breakdown: {memory_status.get('complexity_breakdown', {})}")
+    print(f"- Goal relationships: {memory_status.get('relationship_count', 0)}")
+    print(f"- Task profiles: {memory_status.get('task_profile_count', 0)}")
+    print(f"- Workflow runs: {memory_status.get('workflow_run_count', 0)}")
     print(f"- Retrieved matches: {memory_status.get('retrieved_goal_count', 0)}")
     print("\nRecent goals:")
     recent_goals = memory_status.get("recent_goals", [])
@@ -990,14 +1030,15 @@ def print_memory_status(memory_status: dict[str, Any]) -> None:
 
 
 def print_status_overview(base_dir: Path | str) -> None:
-    """Print the current module map plus the latest Phase1 to Phase4 runtime state."""
+    """Print the current module map plus the latest Phase1 to Phase5 runtime state."""
     print(format_module_map())
     print("\nScope:")
     print("- Phase1 runs safe placeholder tasks and stores structured status/log files.")
     print("- Phase2 runs a minimal local closed-loop with planning, execution, analysis, and loop control.")
     print("- Phase3 adds memory placeholders, priority scheduling, batched parallel tasks, and Codex/GPT placeholders.")
     print("- Phase4 adds versioned goals, richer task trees, callback-aware execution, and review packaging.")
-    print("- Streamlit visualizes goals, plans, reports, memory, and historical runtime artifacts.")
+    print("- Phase5 adds local task history, heuristic planning, self-optimization, and richer dashboard analytics.")
+    print("- Streamlit visualizes goals, plans, reports, memory, task history, and historical runtime artifacts.")
 
     print(f"\nRuntime root: {runtime_root(base_dir)}")
 
@@ -1008,6 +1049,8 @@ def print_status_overview(base_dir: Path | str) -> None:
     current_report = read_json_file(final_report_path(base_dir))
     current_loop_state = read_json_file(loop_state_path(base_dir))
     current_memory = load_memory_status(state_dir(base_dir))
+    current_task_history = load_task_history(state_dir(base_dir))
+    current_workflow_history = load_workflow_history(state_dir(base_dir))
 
     print("\nPhase1 status:")
     if phase1_manifest:
@@ -1020,7 +1063,7 @@ def print_status_overview(base_dir: Path | str) -> None:
     else:
         print("- Overall status: no Phase1 run recorded")
 
-    print("\nWorkflow status (latest Phase2/Phase4 run):")
+    print("\nWorkflow status (latest Phase2/Phase5 run):")
     if current_goal:
         print(f"- Goal phase: {current_goal.get('phase', 'unknown')}")
         print(f"- Goal version: {current_goal.get('goal_version', 1)}")
@@ -1049,6 +1092,8 @@ def print_status_overview(base_dir: Path | str) -> None:
     print(f"- Stored goals: {current_memory.get('goal_count', 0)}")
     print(f"- Vector placeholders: {current_memory.get('vector_count', 0)}")
     print(f"- Phase breakdown: {current_memory.get('phase_breakdown', {})}")
+    print(f"- Task profiles: {current_task_history.get('task_profile_count', 0)}")
+    print(f"- Workflow runs: {current_workflow_history.get('run_count', 0)}")
 
 
 def run_phase1(base_dir: Path | str) -> int:
@@ -1098,13 +1143,19 @@ def run_phase1(base_dir: Path | str) -> int:
     return 0 if status["overall_status"] == "passed" else 1
 
 
-def plan_workflow(base_dir: Path | str, goal_text: str | None, project_dir: str | Path, *, phase: str) -> tuple[ProjectGoal, list[PlannedTask], dict[str, Any], dict[str, Any]]:
-    """Resolve a workflow goal, optionally update memory, and generate a task plan."""
+def plan_workflow(
+    base_dir: Path | str,
+    goal_text: str | None,
+    project_dir: str | Path,
+    *,
+    phase: str,
+) -> tuple[ProjectGoal, list[PlannedTask], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Resolve a workflow goal, update local memory, and generate a task plan."""
     ensure_runtime_tree(base_dir)
     goal = resolve_goal(base_dir, goal_text, project_dir, phase=phase)
 
     memory_state = load_memory_status(state_dir(base_dir))
-    if phase in {"Phase3", "Phase4"} and goal.memory_enabled:
+    if phase in {"Phase3", "Phase4", "Phase5"} and goal.memory_enabled:
         persisted_memory = persist_goal_memory(state_dir(base_dir), goal)
         append_json_line(
             execution_log_path(base_dir),
@@ -1119,7 +1170,7 @@ def plan_workflow(base_dir: Path | str, goal_text: str | None, project_dir: str 
             },
         )
         memory_state = load_memory_status(state_dir(base_dir))
-        if phase == "Phase4":
+        if phase in {"Phase4", "Phase5"}:
             memory_state = retrieve_memory_context(state_dir(base_dir), goal, limit=8)
             append_json_line(
                 execution_log_path(base_dir),
@@ -1133,14 +1184,24 @@ def plan_workflow(base_dir: Path | str, goal_text: str | None, project_dir: str 
                 },
             )
 
-    tasks = generate_task_plan(goal, phase=phase)
+    task_history = load_task_history(state_dir(base_dir))
+    memory_state = {
+        **memory_state,
+        "task_profile_count": task_history.get("task_profile_count", 0),
+    }
+    tasks = generate_task_plan(goal, phase=phase, task_history=task_history)
     payload = save_plan(base_dir, goal, tasks, phase=phase)
-    return goal, tasks, payload, memory_state
+    return goal, tasks, payload, memory_state, task_history
 
 
 def run_autonomous_phase(base_dir: Path | str, goal_text: str | None, project_dir: str | Path, *, phase: str) -> int:
-    """Execute the Phase2, Phase3, or Phase4 autonomous workflow."""
-    goal, tasks, plan_payload, memory_state = plan_workflow(base_dir, goal_text, project_dir, phase=phase)
+    """Execute the Phase2, Phase3, Phase4, or Phase5 autonomous workflow."""
+    goal, tasks, plan_payload, memory_state, task_history_state = plan_workflow(
+        base_dir,
+        goal_text,
+        project_dir,
+        phase=phase,
+    )
     loop_state = initialize_loop_state(goal.goal_id, len(tasks), phase=phase)
     write_json_file(loop_state_path(base_dir), loop_state.to_dict())
 
@@ -1177,6 +1238,7 @@ def run_autonomous_phase(base_dir: Path | str, goal_text: str | None, project_di
             task_records,
             phase=phase,
             memory_state=memory_state,
+            task_history=task_history_state,
             plan_payload=plan_payload,
         )
         results = execute_task_batch(ready_tasks, context, attempt_map, result_callback=log_result_callback)
@@ -1207,6 +1269,13 @@ def run_autonomous_phase(base_dir: Path | str, goal_text: str | None, project_di
                     "artifact_path": result.artifact_path,
                 },
             )
+            task_history_state = update_task_history(
+                state_dir(base_dir),
+                goal.to_dict(),
+                task,
+                result,
+                analysis,
+            )
 
         loop_state = apply_batch_to_loop(loop_state, ready_tasks, analyses)
         write_json_file(loop_state_path(base_dir), loop_state.to_dict())
@@ -1214,6 +1283,7 @@ def run_autonomous_phase(base_dir: Path | str, goal_text: str | None, project_di
         if loop_state.next_action in {"stop", "human_intervention"}:
             break
 
+    workflow_history_state = load_workflow_history(state_dir(base_dir))
     final_report = build_final_report(
         goal_payload=goal.to_dict(),
         plan_payload=plan_payload,
@@ -1221,6 +1291,20 @@ def run_autonomous_phase(base_dir: Path | str, goal_text: str | None, project_di
         task_records=task_records,
         phase=phase,
         memory_state=memory_state,
+        task_history_state=task_history_state,
+        workflow_history_state=workflow_history_state,
+    )
+    write_json_file(final_report_path(base_dir), final_report)
+    workflow_history_state = update_workflow_history(state_dir(base_dir), final_report)
+    final_report = build_final_report(
+        goal_payload=goal.to_dict(),
+        plan_payload=plan_payload,
+        loop_state_payload=loop_state.to_dict(),
+        task_records=task_records,
+        phase=phase,
+        memory_state=memory_state,
+        task_history_state=task_history_state,
+        workflow_history_state=workflow_history_state,
     )
     write_json_file(final_report_path(base_dir), final_report)
     append_json_line(
@@ -1245,7 +1329,7 @@ def show_latest_report(base_dir: Path | str) -> int:
     """Load and print the latest persisted workflow final report."""
     report = read_json_file(final_report_path(base_dir))
     if not report:
-        print("Workflow final report not found. Run `--run-phase2`, `--run-phase3`, or `--run-phase4` first.")
+        print("Workflow final report not found. Run `--run-phase2`, `--run-phase3`, `--run-phase4`, or `--run-phase5` first.")
         return 1
     print_workflow_report(report)
     return 0
@@ -1253,8 +1337,53 @@ def show_latest_report(base_dir: Path | str) -> int:
 
 def show_memory_status(base_dir: Path | str) -> int:
     """Load and print the current memory placeholder state."""
-    memory_status = load_memory_status(state_dir(base_dir))
+    memory_status = {
+        **load_memory_status(state_dir(base_dir)),
+        "task_profile_count": load_task_history(state_dir(base_dir)).get("task_profile_count", 0),
+        "workflow_run_count": load_workflow_history(state_dir(base_dir)).get("run_count", 0),
+    }
     print_memory_status(memory_status)
+    return 0
+
+
+def show_memory_query(base_dir: Path | str, query_text: str | None) -> int:
+    """Query historical goal, task, and workflow memory using local matching rules."""
+    goal_matches = query_goal_memory(state_dir(base_dir), query_text, limit=10)
+    task_matches = query_task_history(state_dir(base_dir), query_text, limit=10)
+    workflow_matches = query_workflow_history(state_dir(base_dir), query_text, limit=10)
+
+    print("Workflow memory query")
+    print(f"- Query: {goal_matches.get('query') or '(recent items)'}")
+    print(f"- Goal matches: {goal_matches.get('match_count', 0)}")
+    print(f"- Task matches: {task_matches.get('match_count', 0)}")
+    print(f"- Workflow matches: {workflow_matches.get('match_count', 0)}")
+
+    print("\nGoal memory:")
+    if not goal_matches.get("matches"):
+        print("- none")
+    for entry in goal_matches.get("matches", []):
+        print(
+            f"- {entry.get('goal_id')} [{entry.get('phase')}] "
+            f"v{entry.get('goal_version', 1)} {entry.get('priority', 'unknown')} -> {entry.get('normalized_goal', '')}"
+        )
+
+    print("\nTask memory:")
+    if not task_matches.get("matches"):
+        print("- none")
+    for entry in task_matches.get("matches", []):
+        print(
+            f"- {entry.get('task_id')} ({entry.get('module_name')}/{entry.get('executor_type')}): "
+            f"runs={entry.get('runs', 0)}, success_rate={entry.get('success_rate', 0.0)}, retry_rate={entry.get('retry_rate', 0.0)}"
+        )
+
+    print("\nWorkflow history:")
+    if not workflow_matches.get("matches"):
+        print("- none")
+    for entry in workflow_matches.get("matches", []):
+        print(
+            f"- {entry.get('goal_id')} [{entry.get('phase')}] {entry.get('overall_status')} "
+            f"tasks={entry.get('task_count', 0)} duration={entry.get('total_duration_seconds', 0.0)}"
+        )
     return 0
 
 
@@ -1275,7 +1404,7 @@ def render_streamlit_placeholder() -> None:
     base_dir = streamlit_base_dir()
     st.set_page_config(page_title=APP_NAME, layout="wide")
     st.title(APP_NAME)
-    st.caption("Phase1 + Phase2 + Phase3 + Phase4 prototype dashboard")
+    st.caption("Phase1 + Phase2 + Phase3 + Phase4 + Phase5 prototype dashboard")
     st.info(
         "This UI visualizes the current local runtime state only. "
         "Interactive controls are limited to browsing historical runtime data and reports."
@@ -1295,7 +1424,13 @@ def render_streamlit_placeholder() -> None:
     current_plan = read_json_file(plan_path(base_dir))
     current_loop_state = read_json_file(loop_state_path(base_dir))
     current_report = read_json_file(final_report_path(base_dir))
-    current_memory = load_memory_status(state_dir(base_dir))
+    current_memory = {
+        **load_memory_status(state_dir(base_dir)),
+        "task_profile_count": load_task_history(state_dir(base_dir)).get("task_profile_count", 0),
+        "workflow_run_count": load_workflow_history(state_dir(base_dir)).get("run_count", 0),
+    }
+    current_task_history = load_task_history(state_dir(base_dir))
+    current_workflow_history = load_workflow_history(state_dir(base_dir))
     recent_logs = read_recent_logs(base_dir)
 
     st.subheader("Phase1")
@@ -1322,7 +1457,7 @@ def render_streamlit_placeholder() -> None:
         st.write("Goal")
         st.json(current_goal)
     else:
-        st.warning("No Phase2 to Phase4 goal is stored yet.")
+        st.warning("No Phase2 to Phase5 goal is stored yet.")
 
     if current_plan:
         st.write("Plan")
@@ -1378,6 +1513,15 @@ def render_streamlit_placeholder() -> None:
                         for row in duration_series
                     }
                 )
+            retry_series = current_report.get("visualization", {}).get("retry_series", [])
+            if retry_series:
+                st.write("Task retry/attempt chart")
+                st.bar_chart(
+                    {
+                        row["task_id"]: row.get("attempt", 1)
+                        for row in retry_series
+                    }
+                )
     else:
         st.warning("No final report is available yet.")
 
@@ -1392,6 +1536,64 @@ def render_streamlit_placeholder() -> None:
         selected_goal_label = st.selectbox("View historical goal", goal_labels, key="historical-goal")
         selected_goal_index = goal_labels.index(selected_goal_label)
         st.json(historical_goals[selected_goal_index])
+    if current_memory.get("phase_breakdown"):
+        st.write("Memory phase breakdown")
+        st.bar_chart(current_memory.get("phase_breakdown", {}))
+    if current_memory.get("complexity_breakdown"):
+        st.write("Memory complexity breakdown")
+        st.bar_chart(current_memory.get("complexity_breakdown", {}))
+
+    st.subheader("Task History")
+    task_profiles = list(current_task_history.get("task_profiles", {}).values())
+    if task_profiles:
+        st.table(task_profiles)
+        task_profile_labels = [
+            f"{entry.get('task_id')} | runs={entry.get('runs', 0)}"
+            for entry in task_profiles
+        ]
+        selected_task_profile = st.selectbox("View historical task profile", task_profile_labels, key="historical-task-profile")
+        selected_task_profile_index = task_profile_labels.index(selected_task_profile)
+        st.json(task_profiles[selected_task_profile_index])
+        st.write("Task success rates")
+        st.bar_chart(
+            {
+                entry.get("task_id"): float(entry.get("success_rate", 0.0))
+                for entry in task_profiles[:15]
+            }
+        )
+        st.write("Task retry rates")
+        st.bar_chart(
+            {
+                entry.get("task_id"): float(entry.get("retry_rate", 0.0))
+                for entry in task_profiles[:15]
+            }
+        )
+    else:
+        st.warning("No task history is available yet.")
+
+    st.subheader("Workflow History")
+    workflow_runs = current_workflow_history.get("recent_runs", [])
+    if workflow_runs:
+        st.table(workflow_runs)
+        workflow_labels = [
+            f"{entry.get('goal_id')} | {entry.get('phase')} | {entry.get('overall_status')}"
+            for entry in workflow_runs
+        ]
+        selected_workflow = st.selectbox("View historical workflow run", workflow_labels, key="historical-workflow")
+        selected_workflow_index = workflow_labels.index(selected_workflow)
+        st.json(workflow_runs[selected_workflow_index])
+    else:
+        st.warning("No workflow history is available yet.")
+
+    st.subheader("Usage Metrics")
+    st.bar_chart(
+        {
+            "stored_goals": current_memory.get("goal_count", 0),
+            "vector_placeholders": current_memory.get("vector_count", 0),
+            "task_profiles": current_task_history.get("task_profile_count", 0),
+            "workflow_runs": current_workflow_history.get("run_count", 0),
+        }
+    )
 
     st.subheader("Recent logs")
     if recent_logs:
@@ -1409,7 +1611,9 @@ def render_streamlit_placeholder() -> None:
                 "- `python -m autonomous_project_development_agent --goal \"Read a local project directory, generate a module list, count Python files, and output a preliminary analysis report.\" --run-phase2`",
                 "- `python -m autonomous_project_development_agent --goal \"Inspect a local project, build a reusable module inventory, compute Python file metrics, and generate a safe autonomous implementation suggestion.\" --run-phase3`",
                 "- `python -m autonomous_project_development_agent --goal \"Inspect a local project, recover relevant historical context, generate a dependency-aware task tree, prepare safe autonomous implementation suggestions, and produce an iteration review package.\" --run-phase4`",
+                "- `python -m autonomous_project_development_agent --goal \"Inspect a local project, reuse historical memory, generate a self-optimizing task tree, execute safe local analysis tasks, and produce a local autonomy review without external AI APIs.\" --run-phase5`",
                 "- `python -m autonomous_project_development_agent --memory-status`",
+                "- `python -m autonomous_project_development_agent --memory-query --goal \"phase5\"`",
                 "- `python -m autonomous_project_development_agent --visualize`",
                 "- `python -m autonomous_project_development_agent --report`",
             ]
@@ -1479,7 +1683,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         return run_phase1(args.base_dir)
 
     if args.plan:
-        goal, tasks, _, memory_state = plan_workflow(args.base_dir, args.goal_text, args.project_dir, phase="Phase2")
+        goal, tasks, _, memory_state, _ = plan_workflow(args.base_dir, args.goal_text, args.project_dir, phase="Phase2")
         print_task_plan(goal, tasks, memory_state)
         return 0
 
@@ -1492,11 +1696,17 @@ def cli_main(argv: list[str] | None = None) -> int:
     if args.run_phase4:
         return run_autonomous_phase(args.base_dir, args.goal_text, args.project_dir, phase="Phase4")
 
+    if args.run_phase5:
+        return run_autonomous_phase(args.base_dir, args.goal_text, args.project_dir, phase="Phase5")
+
     if args.report:
         return show_latest_report(args.base_dir)
 
     if args.memory_status:
         return show_memory_status(args.base_dir)
+
+    if args.memory_query:
+        return show_memory_query(args.base_dir, args.goal_text)
 
     if args.visualize:
         return launch_visualization(args.base_dir)
@@ -1504,13 +1714,15 @@ def cli_main(argv: list[str] | None = None) -> int:
     if args.goal_text:
         if args.goal_text == DEFAULT_PHASE4_GOAL:
             target_phase = "Phase4"
+        elif args.goal_text == DEFAULT_PHASE5_GOAL:
+            target_phase = "Phase5"
         elif args.goal_text == DEFAULT_PHASE3_GOAL:
             target_phase = "Phase3"
         else:
             target_phase = "Phase2"
         goal = resolve_goal(args.base_dir, args.goal_text, args.project_dir, phase=target_phase)
         print_goal_summary(goal)
-        print("\nTip: use `--plan`, `--run-phase2`, `--run-phase3`, or `--run-phase4` to continue.")
+        print("\nTip: use `--plan`, `--run-phase2`, `--run-phase3`, `--run-phase4`, or `--run-phase5` to continue.")
         return 0
 
     parser.print_help()

@@ -49,6 +49,17 @@ Phase4 expands the prototype into a richer managed-autonomy loop:
 - produce richer reports, statistics, and dashboard visualization data,
 - keep the workflow safe, local, and non-mutating.
 
+## Phase5 Objectives
+
+Phase5 adds a local-only autonomy layer with historical learning:
+
+- persist goals with versioning and parent/child tracking in local memory,
+- maintain task execution history and workflow history for later reuse,
+- generate multi-task trees using deterministic rules and templates,
+- support local self-optimization through task-priority and retry heuristics,
+- enhance the dashboard with memory, success-rate, retry, and history views,
+- keep the entire workflow local and free of external AI API calls.
+
 ## High-Level Architecture
 
 ### Goal Framework
@@ -61,12 +72,15 @@ and the structured context that downstream modules should consume.
 Will eventually transform the goal into an execution plan, prompt payloads,
 task sequencing rules for coding agents or other backends. In Phase4 it now
 builds a lightweight dependency-aware task tree with parallel scan batches.
+Phase5 further adjusts priorities and retry budgets using local historical
+task outcomes.
 
 ### Executor
 
 Acts as the integration boundary for safe local Python execution in Phase2,
 Phase3 placeholder Codex/GPT execution, and Phase4 callback-aware suggestion
-and review packaging. It remains the future attachment
+and review packaging. Phase5 adds local-only sample execution and more
+deterministic placeholder AI-style tasks. It remains the future attachment
 point for real Codex, OpenAI APIs, shell tools, MATLAB workflows, notebooks,
 and other implementation channels.
 
@@ -79,7 +93,8 @@ produce a verdict that informs the next iteration.
 
 Owns iteration budgets, stop conditions, retries, and future human-approval
 checkpoints. Phase4 also tracks decisions, batch execution, and review state
-for the dashboard.
+for the dashboard. Phase5 adds local heuristic scheduling signals and richer
+retry statistics.
 
 ## What The Current Prototype Deliberately Does Not Include
 
@@ -93,5 +108,5 @@ for the dashboard.
 
 The current prototype is useful when a contributor can install the package
 locally, run the CLI, launch the Streamlit placeholder, execute the minimal
-Phase2 to Phase4 loops, inspect stored memory and reports, and identify where
-future Phase5 capabilities should be added.
+Phase2 to Phase5 loops, inspect stored memory and reports, and identify where
+future Phase6 capabilities should be added.

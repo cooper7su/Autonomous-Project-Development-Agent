@@ -10,6 +10,8 @@ autonomous project workflow. The repository now includes:
   Codex/GPT execution, and richer autonomous loop state management
 - Phase4: versioned goals, memory-aware task trees, callback-aware execution,
   richer analysis, and a review-oriented autonomous reporting loop
+- Phase5: local task history, heuristic planning, self-optimization, richer
+  memory browsing, and local-only autonomous execution without external AI APIs
 
 The current implementation remains intentionally conservative:
 
@@ -22,7 +24,7 @@ The current implementation remains intentionally conservative:
 
 - Maintain a reusable project structure under `Autonomous-Project-Development-Agent`
 - Provide installable Python packaging through `requirements.txt` and `pyproject.toml`
-- Expose CLI and Streamlit entry points for Phase1, Phase2, Phase3, and Phase4
+- Expose CLI and Streamlit entry points for Phase1 through Phase5
 - Persist goals, plans, loop state, reports, and logs in a structured runtime tree
 
 ## Repository Layout
@@ -112,9 +114,11 @@ Available commands:
 - `--run-phase2`: execute the full minimal Phase2 closed-loop workflow.
 - `--run-phase3`: execute the Phase3 autonomous workflow with memory and batched task handling.
 - `--run-phase4`: execute the Phase4 autonomous workflow with versioned goals, task trees, and review packaging.
+- `--run-phase5`: execute the Phase5 autonomous workflow with local memory, heuristic planning, and self-optimization.
 - `--memory-status`: show stored goal memory and vector-store placeholder state.
+- `--memory-query`: query historical goal, task, and workflow memory using local matching rules.
 - `--visualize`: launch the Streamlit dashboard.
-- `--report`: show the latest Phase2, Phase3, or Phase4 execution report.
+- `--report`: show the latest Phase2, Phase3, Phase4, or Phase5 execution report.
 
 Examples:
 
@@ -126,7 +130,9 @@ python -m autonomous_project_development_agent --goal "Read a local project dire
 python -m autonomous_project_development_agent --goal "Read a local project directory, generate a module list, count Python files, and output a preliminary analysis report." --run-phase2
 python -m autonomous_project_development_agent --goal "Inspect a local project, build a reusable module inventory, compute Python file metrics, and generate a safe autonomous implementation suggestion." --run-phase3
 python -m autonomous_project_development_agent --goal "Inspect a local project, recover relevant historical context, generate a dependency-aware task tree, prepare safe autonomous implementation suggestions, and produce an iteration review package." --run-phase4
+python -m autonomous_project_development_agent --goal "Inspect a local project, reuse historical memory, generate a self-optimizing task tree, execute safe local analysis tasks, and produce a local autonomy review without external AI APIs." --run-phase5
 python -m autonomous_project_development_agent --memory-status
+python -m autonomous_project_development_agent --memory-query --goal "phase5"
 python -m autonomous_project_development_agent --visualize
 python -m autonomous_project_development_agent --report
 ```
@@ -143,15 +149,15 @@ The Streamlit view displays:
 
 - module map
 - Phase1 task tree and latest Phase1 status
-- latest Phase2 to Phase4 goal, plan, loop state, logs, and final report
-- memory placeholder state, historical goal browsing, and visualization summary payloads
+- latest Phase2 to Phase5 goal, plan, loop state, logs, and final report
+- memory placeholder state, historical goal browsing, task history, workflow history, and visualization summary payloads
 
 It remains lightweight, but now supports simple browsing interactions for
-historical goals and latest task records.
+historical goals, task profiles, workflow runs, and latest task records.
 
 ## Runtime Files
 
-When Phase2, Phase3, or Phase4 runs, the following files are written under `phase1_runtime/state/`:
+When Phase2 through Phase5 runs, the following files are written under `phase1_runtime/state/`:
 
 - `goal.json`
 - `plan.json`
@@ -159,6 +165,8 @@ When Phase2, Phase3, or Phase4 runs, the following files are written under `phas
 - `final_report.json`
 - `memory_store.json`
 - `vector_store_placeholder.json`
+- `task_history.json`
+- `workflow_history.json`
 
 The shared log stream is written to `phase1_runtime/logs/execution_log.jsonl`.
 
@@ -171,6 +179,6 @@ The shared log stream is written to `phase1_runtime/logs/execution_log.jsonl`.
 
 ```bash
 git add .
-git commit -m "Implement Phase4 memory-aware autonomous workflow"
+git commit -m "Implement Phase5 local autonomy workflow"
 git push -u origin main
 ```

@@ -1,13 +1,13 @@
-"""Goal modeling and memory helpers for the Phase2 to Phase4 workflows.
+"""Goal modeling and local memory helpers for the Phase2 to Phase5 workflows.
 
-Phase4 extends the earlier scaffold with:
-- version-tracked goals,
-- placeholder long-term memory retrieval,
-- priority and dependency metadata,
-- safe local memory interfaces for later autonomous planning.
+Phase5 extends the earlier scaffold with:
+- richer local memory management,
+- goal versioning plus parent/child tracking,
+- lightweight complexity assessment,
+- local memory querying for historical goal retrieval.
 
-Phase5 can replace these deterministic placeholders with real retrieval,
-ranking, policy-aware memory selection, and cross-project coordination.
+Future phases can replace these deterministic placeholders with stronger
+retrieval, clustering, policy-aware ranking, and cross-project memory sharing.
 """
 
 from __future__ import annotations
@@ -33,6 +33,12 @@ DEFAULT_PHASE4_GOAL = (
     "Inspect a local project, recover relevant historical context, generate a "
     "dependency-aware task tree, prepare safe autonomous implementation "
     "suggestions, and produce an iteration review package."
+)
+
+DEFAULT_PHASE5_GOAL = (
+    "Inspect a local project, reuse historical memory, generate a self-optimizing "
+    "task tree, execute safe local analysis tasks, and produce a local autonomy "
+    "review without external AI APIs."
 )
 
 PRIORITY_SCORES = {
@@ -61,6 +67,17 @@ def _tokenize(text: str) -> set[str]:
     return {token for token in cleaned.split() if len(token) >= 3}
 
 
+def infer_goal_complexity(goal_text: str) -> str:
+    """Infer a lightweight goal complexity label from local heuristics."""
+    tokens = goal_text.split()
+    connective_count = sum(goal_text.count(marker) for marker in [",", " and ", " then ", " while "])
+    if len(tokens) <= 10 and connective_count <= 1:
+        return "simple"
+    if len(tokens) <= 22 and connective_count <= 3:
+        return "moderate"
+    return "complex"
+
+
 @dataclass(frozen=True)
 class ProjectGoal:
     """Structured representation of a project goal across prototype phases."""
@@ -82,7 +99,9 @@ class ProjectGoal:
     vector_store_ref: str | None = None
     goal_version: int = 1
     parent_goal_id: str | None = None
+    child_goal_ids: list[str] = field(default_factory=list)
     retrieval_notes: list[str] = field(default_factory=list)
+    complexity_level: str = "moderate"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the goal into JSON-friendly data."""
@@ -109,7 +128,9 @@ class ProjectGoal:
             vector_store_ref=payload.get("vector_store_ref"),
             goal_version=int(payload.get("goal_version", 1)),
             parent_goal_id=payload.get("parent_goal_id"),
+            child_goal_ids=list(payload.get("child_goal_ids", [])),
             retrieval_notes=list(payload.get("retrieval_notes", [])),
+            complexity_level=payload.get("complexity_level", "moderate"),
         )
 
     @property
@@ -159,6 +180,7 @@ def infer_goal_lineage(state_dir: str | Path, normalized_goal: str) -> dict[str,
             "goal_version": 1,
             "parent_goal_id": None,
             "retrieval_notes": [],
+            "child_goal_ids": [],
         }
 
     latest_match = matching_goals[0]
@@ -170,6 +192,7 @@ def infer_goal_lineage(state_dir: str | Path, normalized_goal: str) -> dict[str,
             f"Historical memory contains {len(matching_goals)} earlier goal versions with the same normalized text.",
             f"Latest related goal: {latest_match.get('goal_id')}",
         ],
+        "child_goal_ids": list(latest_match.get("child_goal_ids", [])),
     }
 
 
@@ -188,15 +211,22 @@ def build_project_goal(
         "Phase2": DEFAULT_PHASE2_GOAL,
         "Phase3": DEFAULT_PHASE3_GOAL,
         "Phase4": DEFAULT_PHASE4_GOAL,
+        "Phase5": DEFAULT_PHASE5_GOAL,
     }.get(phase, DEFAULT_PHASE2_GOAL)
     normalized_goal = " ".join((raw_goal or default_goal).strip().split())
+    complexity_level = infer_goal_complexity(normalized_goal)
     target_path = Path(target_project_dir).resolve()
     timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-    memory_enabled = phase in {"Phase3", "Phase4"} if enable_memory is None else enable_memory
+    memory_enabled = phase in {"Phase3", "Phase4", "Phase5"} if enable_memory is None else enable_memory
     lineage = (
         infer_goal_lineage(state_dir, normalized_goal)
         if state_dir is not None and memory_enabled
-        else {"goal_version": 1, "parent_goal_id": None, "retrieval_notes": []}
+        else {
+            "goal_version": 1,
+            "parent_goal_id": None,
+            "retrieval_notes": [],
+            "child_goal_ids": [],
+        }
     )
 
     success_criteria = [
@@ -205,8 +235,8 @@ def build_project_goal(
         "Project inspection artifacts are created without mutating source files.",
         "A structured report is produced without external network calls.",
     ]
-    if phase in {"Phase3", "Phase4"}:
-        success_criteria.append("Historical goal memory is updated with a vector-store placeholder entry.")
+    if phase in {"Phase3", "Phase4", "Phase5"}:
+        success_criteria.append("Historical goal memory is updated with a local vector-store placeholder entry.")
     if phase == "Phase4":
         success_criteria.extend(
             [
@@ -214,25 +244,37 @@ def build_project_goal(
                 "The workflow produces a review package with safe autonomous suggestions and iteration notes.",
             ]
         )
+    if phase == "Phase5":
+        success_criteria.extend(
+            [
+                "A local self-optimization heuristic adjusts task scheduling or retry policy.",
+                "Task history and workflow history are updated for later runs.",
+            ]
+        )
 
     constraints = [
         "Only safe local filesystem inspection is allowed.",
-        "No production Codex or GPT execution is enabled.",
+        "No production Codex, GPT, or OpenAI API execution is enabled.",
         "MATLAB and other external toolchains remain documented integration points only.",
     ]
-    if phase == "Phase4":
+    if phase in {"Phase4", "Phase5"}:
         constraints.append("Autonomous code generation remains a placeholder and must not mutate project files.")
+    if phase == "Phase5":
+        constraints.append("All optimization logic must be local, deterministic, and safe to rerun.")
 
     notes = [
         f"This goal is configured for the {phase} prototype workflow.",
         "Placeholder agent executors may simulate reasoning, but they do not mutate project code.",
         f"Goal version: {lineage['goal_version']}.",
+        f"Complexity level: {complexity_level}.",
     ]
     notes.extend(lineage["retrieval_notes"])
 
-    tags = ["python", "local-analysis", phase.lower()]
+    tags = ["python", "local-analysis", phase.lower(), complexity_level]
     if phase == "Phase4":
         tags.extend(["memory-aware", "task-tree", "autonomous-review"])
+    if phase == "Phase5":
+        tags.extend(["self-optimization", "historical-memory", "local-autonomy"])
 
     memory_keys = [f"{phase.lower()}::{_goal_slug(normalized_goal)}"] if memory_enabled else []
     vector_store_ref = f"vector::{phase.lower()}::{timestamp}" if memory_enabled else None
@@ -255,8 +297,30 @@ def build_project_goal(
         vector_store_ref=vector_store_ref,
         goal_version=int(lineage["goal_version"]),
         parent_goal_id=lineage["parent_goal_id"],
+        child_goal_ids=list(lineage["child_goal_ids"]),
         retrieval_notes=list(lineage["retrieval_notes"]),
+        complexity_level=complexity_level,
     )
+
+
+def _rebuild_goal_children(goals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rebuild child-goal references from parent-goal links."""
+    child_map: dict[str, list[str]] = {}
+    for entry in goals:
+        parent_goal_id = entry.get("parent_goal_id")
+        if parent_goal_id:
+            child_map.setdefault(parent_goal_id, []).append(entry.get("goal_id"))
+
+    rebuilt: list[dict[str, Any]] = []
+    for entry in goals:
+        cloned = dict(entry)
+        cloned["child_goal_ids"] = child_map.get(entry.get("goal_id"), [])
+        cloned["complexity_level"] = cloned.get("complexity_level") or infer_goal_complexity(
+            str(cloned.get("normalized_goal", ""))
+        )
+        cloned["goal_version"] = int(cloned.get("goal_version", 1))
+        rebuilt.append(cloned)
+    return rebuilt
 
 
 def persist_goal_memory(state_dir: str | Path, goal: ProjectGoal) -> dict[str, Any]:
@@ -286,7 +350,9 @@ def persist_goal_memory(state_dir: str | Path, goal: ProjectGoal) -> dict[str, A
         "memory_keys": goal.memory_keys,
         "goal_version": goal.goal_version,
         "parent_goal_id": goal.parent_goal_id,
+        "child_goal_ids": list(goal.child_goal_ids),
         "tags": goal.tags,
+        "complexity_level": goal.complexity_level,
     }
     vector_entry = {
         "goal_id": goal.goal_id,
@@ -300,10 +366,13 @@ def persist_goal_memory(state_dir: str | Path, goal: ProjectGoal) -> dict[str, A
         ],
         "created_at": goal.created_at,
         "phase": goal.phase,
+        "complexity_level": goal.complexity_level,
     }
 
     goals = [entry for entry in memory_payload.get("goals", []) if entry.get("goal_id") != goal.goal_id]
     goals.insert(0, memory_entry)
+    goals = _rebuild_goal_children(goals)
+
     vectors = [
         entry
         for entry in vector_payload.get("vectors", [])
@@ -314,12 +383,12 @@ def persist_goal_memory(state_dir: str | Path, goal: ProjectGoal) -> dict[str, A
     memory_payload = {
         "updated_at": utc_now(),
         "goal_count": len(goals),
-        "goals": goals[:100],
+        "goals": goals[:150],
     }
     vector_payload = {
         "updated_at": utc_now(),
         "vector_count": len(vectors),
-        "vectors": vectors[:100],
+        "vectors": vectors[:150],
     }
 
     write_json_file(memory_store_path(state_path), memory_payload)
@@ -346,9 +415,15 @@ def load_memory_status(state_dir: str | Path) -> dict[str, Any]:
     }
 
     phase_breakdown: dict[str, int] = {}
+    complexity_breakdown: dict[str, int] = {}
+    relationship_count = 0
     for entry in memory_payload.get("goals", []):
         phase = entry.get("phase", "unknown")
+        complexity = entry.get("complexity_level", "unknown")
         phase_breakdown[phase] = phase_breakdown.get(phase, 0) + 1
+        complexity_breakdown[complexity] = complexity_breakdown.get(complexity, 0) + 1
+        if entry.get("parent_goal_id"):
+            relationship_count += 1
 
     return {
         "updated_at": max(
@@ -366,6 +441,8 @@ def load_memory_status(state_dir: str | Path) -> dict[str, Any]:
         "recent_goals": memory_payload.get("goals", [])[:10],
         "recent_vectors": vector_payload.get("vectors", [])[:10],
         "phase_breakdown": phase_breakdown,
+        "complexity_breakdown": complexity_breakdown,
+        "relationship_count": relationship_count,
     }
 
 
@@ -390,7 +467,8 @@ def retrieve_memory_context(
         overlap_score = len(goal_tokens & _tokenize(entry_goal))
         phase_bonus = 1 if entry.get("phase") == goal.phase else 0
         priority_bonus = 1 if entry.get("priority") == goal.priority else 0
-        total_score = overlap_score + phase_bonus + priority_bonus
+        complexity_bonus = 1 if entry.get("complexity_level") == goal.complexity_level else 0
+        total_score = overlap_score + phase_bonus + priority_bonus + complexity_bonus
         if total_score <= 0:
             continue
 
@@ -401,7 +479,9 @@ def retrieve_memory_context(
                 "priority": entry.get("priority"),
                 "goal_version": entry.get("goal_version", 1),
                 "parent_goal_id": entry.get("parent_goal_id"),
+                "child_goal_ids": list(entry.get("child_goal_ids", [])),
                 "normalized_goal": entry_goal,
+                "complexity_level": entry.get("complexity_level", "unknown"),
                 "similarity_score": total_score,
                 "created_at": entry.get("created_at"),
             }
@@ -420,8 +500,66 @@ def retrieve_memory_context(
         "goal_id": goal.goal_id,
         "goal_version": goal.goal_version,
         "parent_goal_id": goal.parent_goal_id,
+        "child_goal_ids": goal.child_goal_ids,
+        "complexity_level": goal.complexity_level,
         "matches": limited_matches,
         "retrieved_goal_count": len(limited_matches),
         "top_match_goal_id": limited_matches[0]["goal_id"] if limited_matches else None,
         "memory_scope": "local_placeholder",
+    }
+
+
+def query_goal_memory(
+    state_dir: str | Path,
+    query_text: str | None = None,
+    *,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Query local goal memory using deterministic token overlap heuristics."""
+    state_path = Path(state_dir)
+    status = load_memory_status(state_path)
+    payload = read_json_file(memory_store_path(state_path)) or {"goals": []}
+    normalized_query = " ".join((query_text or "").strip().split())
+    query_tokens = _tokenize(normalized_query)
+
+    results: list[dict[str, Any]] = []
+    for entry in payload.get("goals", []):
+        normalized_goal = entry.get("normalized_goal", "")
+        score = 0
+        if normalized_query:
+            score += len(query_tokens & _tokenize(normalized_goal))
+            if normalized_query.lower() in normalized_goal.lower():
+                score += 3
+            if normalized_query.lower() in str(entry.get("goal_id", "")).lower():
+                score += 2
+            if normalized_query.lower() == str(entry.get("phase", "")).lower():
+                score += 1
+            if score <= 0:
+                continue
+        results.append(
+            {
+                "goal_id": entry.get("goal_id"),
+                "phase": entry.get("phase"),
+                "priority": entry.get("priority"),
+                "goal_version": entry.get("goal_version", 1),
+                "parent_goal_id": entry.get("parent_goal_id"),
+                "child_goal_ids": list(entry.get("child_goal_ids", [])),
+                "complexity_level": entry.get("complexity_level", "unknown"),
+                "normalized_goal": normalized_goal,
+                "created_at": entry.get("created_at"),
+                "score": score,
+            }
+        )
+
+    results.sort(key=lambda entry: (-int(entry.get("score", 0)), entry.get("created_at") or ""), reverse=False)
+    if normalized_query:
+        results = sorted(results, key=lambda entry: (-int(entry.get("score", 0)), entry.get("created_at") or ""))
+    else:
+        results = status.get("recent_goals", [])
+
+    return {
+        "query": normalized_query or None,
+        "match_count": len(results[:limit]),
+        "matches": results[:limit],
+        "memory_status": status,
     }

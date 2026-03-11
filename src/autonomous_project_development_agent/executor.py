@@ -1,10 +1,11 @@
-"""Execution interfaces for the Phase2 to Phase4 workflows.
+"""Execution interfaces for the Phase2 to Phase5 workflows.
 
-Phase4 extends the earlier executor layer with:
+Phase5 extends the earlier executor layer with:
 - callback-aware batched execution,
-- placeholder Codex/GPT routes for autonomous suggestions,
+- placeholder local AI-style routes for autonomous suggestions,
 - safe local memory/context tasks,
-- richer runtime statistics for reporting and visualization.
+- richer runtime statistics for reporting and visualization,
+- deterministic sample Python task execution for local self-optimization.
 
 Phase5 can replace these placeholders with real model calls, stronger
 isolation, approval-aware policies, and tool-specific execution sandboxes.
@@ -46,6 +47,7 @@ class ExecutionContext:
     goal_version: int = 1
     prior_results: list[dict[str, Any]] = field(default_factory=list)
     memory_state: dict[str, Any] = field(default_factory=dict)
+    task_history: dict[str, Any] = field(default_factory=dict)
     plan_summary: dict[str, Any] = field(default_factory=dict)
     max_parallel_tasks: int = 2
 
@@ -116,6 +118,8 @@ class LocalPythonExecutor(BaseExecutor):
                 output, artifact_payload = self._retrieve_memory_context(context)
             elif operation == "summarize_project_artifacts":
                 output, artifact_payload = self._summarize_project_artifacts(target_dir)
+            elif operation == "execute_sample_python_task":
+                output, artifact_payload = self._execute_sample_python_task(context)
             else:
                 raise ValueError(f"Unsupported local operation: {operation}")
 
@@ -296,6 +300,38 @@ class LocalPythonExecutor(BaseExecutor):
         }
         return payload, payload
 
+    def _execute_sample_python_task(self, context: ExecutionContext) -> tuple[dict[str, Any], dict[str, Any]]:
+        dataset = [2, 4, 6, 8, 10]
+        transformed = [value * value for value in dataset]
+        mean = sum(dataset) / len(dataset)
+        script_preview = "\n".join(
+            [
+                "def summarize_dataset(dataset: list[int]) -> dict[str, float]:",
+                "    squares = [value * value for value in dataset]",
+                "    return {",
+                "        'count': len(dataset),",
+                "        'total': sum(dataset),",
+                "        'mean': sum(dataset) / len(dataset),",
+                "        'max_square': max(squares),",
+                "    }",
+            ]
+        )
+        payload = {
+            "task_id": "execute_sample_python_task",
+            "goal_id": context.goal_id,
+            "dataset_count": len(dataset),
+            "total": sum(dataset),
+            "mean": mean,
+            "max_square": max(transformed),
+            "script_preview": script_preview,
+            "statistics": {
+                "dataset_count": len(dataset),
+                "mean": mean,
+                "max_square": max(transformed),
+            },
+        }
+        return payload, payload
+
     def _ignored_parts(self) -> set[str]:
         return {
             ".git",
@@ -343,7 +379,11 @@ class PlaceholderAgentExecutor(BaseExecutor):
         callback_events: list[dict[str, Any]] = []
 
         try:
-            output = self._draft_analysis(task, context)
+            operation = task.metadata.get("operation")
+            if operation == "compile_phase5_task_tree":
+                output = self._build_phase5_task_tree(task, context)
+            else:
+                output = self._draft_analysis(task, context)
             artifact_path.write_text(output["summary_markdown"] + "\n", encoding="utf-8")
             callback_events.append(
                 {
@@ -426,6 +466,57 @@ class PlaceholderAgentExecutor(BaseExecutor):
             },
         }
 
+    def _build_phase5_task_tree(self, task: PlannedTask, context: ExecutionContext) -> dict[str, Any]:
+        results_by_task = {result["task_id"]: result for result in context.prior_results}
+        memory_context = results_by_task.get("retrieve_memory_context", {}).get("output", {})
+        module_inventory = results_by_task.get("generate_module_list", {}).get("output", {})
+        python_metrics = results_by_task.get("count_python_files", {}).get("output", {})
+        sample_execution = results_by_task.get("execute_sample_python_task", {}).get("output", {})
+        artifact_summary = results_by_task.get("summarize_project_artifacts", {}).get("output", {})
+        historical_profiles = context.task_history.get("task_profile_count", 0)
+
+        suggested_subtasks = [
+            {
+                "task_id": "consolidate_project_scan_metrics",
+                "reason": "Combine module inventory and file metrics into one reusable summary object.",
+                "safe": True,
+            },
+            {
+                "task_id": "persist_local_task_profiles",
+                "reason": "Keep local task success and retry history available for later scheduling heuristics.",
+                "safe": True,
+            },
+            {
+                "task_id": "prepare_read_only_preview_hooks",
+                "reason": "Keep future code generation paths in preview mode until stronger controls exist.",
+                "safe": True,
+            },
+        ]
+
+        summary_lines = [
+            "# Phase5 Local Task Tree",
+            "",
+            f"- Goal: {context.goal_text}",
+            f"- Target directory: {context.target_project_dir}",
+            f"- Retrieved memory matches: {memory_context.get('retrieved_goal_count', 0)}",
+            f"- Historical task profiles: {historical_profiles}",
+            f"- Module count: {module_inventory.get('module_count', 0)}",
+            f"- Python file count: {python_metrics.get('python_file_count', 0)}",
+            f"- Sample execution mean: {sample_execution.get('mean', 0)}",
+            f"- Tracked file count: {artifact_summary.get('total_tracked_files', 0)}",
+            "",
+            "## Suggested Subtasks",
+        ]
+        summary_lines.extend(f"- {entry['task_id']}: {entry['reason']}" for entry in suggested_subtasks)
+
+        return {
+            "task_id": task.task_id,
+            "summary_markdown": "\n".join(summary_lines),
+            "suggested_subtasks": suggested_subtasks,
+            "historical_task_profile_count": historical_profiles,
+            "retrieved_goal_count": memory_context.get("retrieved_goal_count", 0),
+        }
+
 
 class CodexExecutor(BaseExecutor):
     """Generate a safe implementation suggestion as a placeholder for Codex/GPT."""
@@ -443,6 +534,8 @@ class CodexExecutor(BaseExecutor):
             operation = task.metadata.get("operation")
             if operation == "phase4_change_suggestion":
                 output = self._build_phase4_suggestion(task, context)
+            elif operation == "phase5_local_automation_suggestion":
+                output = self._build_phase5_suggestion(task, context)
             else:
                 output = self._build_phase3_stub(task, context)
 
@@ -629,6 +722,87 @@ class CodexExecutor(BaseExecutor):
             "tracked_file_count": artifact_summary.get("total_tracked_files", 0),
         }
 
+    def _build_phase5_suggestion(self, task: PlannedTask, context: ExecutionContext) -> dict[str, Any]:
+        results_by_task = {result["task_id"]: result for result in context.prior_results}
+        memory_context = results_by_task.get("retrieve_memory_context", {}).get("output", {})
+        task_tree = results_by_task.get("compile_phase5_task_tree", {}).get("output", {})
+        module_inventory = results_by_task.get("generate_module_list", {}).get("output", {})
+        python_metrics = results_by_task.get("count_python_files", {}).get("output", {})
+        sample_execution = results_by_task.get("execute_sample_python_task", {}).get("output", {})
+        historical_profiles = context.task_history.get("task_profiles", {})
+
+        class_name = "Phase5LocalAutomationBundle"
+        code_preview = "\n".join(
+            [
+                '"""Safe placeholder generated by the Phase5 local automation executor."""',
+                "",
+                f"class {class_name}:",
+                '    """Preview of a future local-only autonomous workflow helper."""',
+                "",
+                "    def summarize(self) -> dict[str, object]:",
+                "        return {",
+                f'            "goal_version": {context.goal_version},',
+                f'            "module_count": {module_inventory.get("module_count", 0)},',
+                f'            "python_file_count": {python_metrics.get("python_file_count", 0)},',
+                f'            "retrieved_goal_count": {memory_context.get("retrieved_goal_count", 0)},',
+                f'            "task_profile_count": {len(historical_profiles)},',
+                f'            "sample_execution_mean": {sample_execution.get("mean", 0)},',
+                "        }",
+            ]
+        )
+
+        suggested_actions = [
+            {
+                "action_id": "stabilize_local_task_templates",
+                "title": "Stabilize local task templates",
+                "safe": True,
+                "reason": "Reuse deterministic local templates for planning and reporting without external APIs.",
+            },
+            {
+                "action_id": "prioritize_low_success_tasks",
+                "title": "Prioritize low-success tasks",
+                "safe": True,
+                "reason": "Use local task history to boost priority and retry budget where reliability is lower.",
+            },
+            {
+                "action_id": "expand_local_visualization_metrics",
+                "title": "Expand local visualization metrics",
+                "safe": True,
+                "reason": "Track retries, success rates, and workflow memory usage across runs.",
+            },
+        ]
+
+        summary_lines = [
+            "# Phase5 Local Automation Suggestion",
+            "",
+            f"- Goal: {context.goal_text}",
+            f"- Goal version: {context.goal_version}",
+            f"- Target directory: {context.target_project_dir}",
+            f"- Retrieved memory matches: {memory_context.get('retrieved_goal_count', 0)}",
+            f"- Historical task profiles: {len(historical_profiles)}",
+            f"- Module inventory size: {module_inventory.get('module_count', 0)}",
+            f"- Python file count: {python_metrics.get('python_file_count', 0)}",
+            f"- Sample execution mean: {sample_execution.get('mean', 0)}",
+            f"- Suggested subtasks: {len(task_tree.get('suggested_subtasks', []))}",
+            "",
+            "## Safe Suggested Actions",
+            "- Stabilize deterministic local templates and task summaries.",
+            "- Boost scheduling attention for tasks with lower historical success.",
+            "- Expand local metrics for retries, success rates, and memory growth.",
+        ]
+
+        return {
+            "task_id": task.task_id,
+            "summary_markdown": "\n".join(summary_lines),
+            "generated_code_preview": code_preview,
+            "suggested_files": ["phase5_local_automation_bundle.py"],
+            "suggested_actions": suggested_actions,
+            "retrieved_goal_count": memory_context.get("retrieved_goal_count", 0),
+            "module_count": module_inventory.get("module_count", 0),
+            "python_file_count": python_metrics.get("python_file_count", 0),
+            "historical_task_profile_count": len(historical_profiles),
+        }
+
 
 class GPTExecutor(BaseExecutor):
     """Simulate a review-oriented GPT execution path for later autonomous phases."""
@@ -643,7 +817,11 @@ class GPTExecutor(BaseExecutor):
         callback_events: list[dict[str, Any]] = []
 
         try:
-            output = self._build_iteration_review(task, context)
+            operation = task.metadata.get("operation")
+            if operation == "phase5_self_optimization_review":
+                output = self._build_phase5_review(task, context)
+            else:
+                output = self._build_iteration_review(task, context)
             if artifact_path.suffix.lower() == ".md":
                 artifact_path.write_text(output["summary_markdown"] + "\n", encoding="utf-8")
             else:
@@ -742,6 +920,61 @@ class GPTExecutor(BaseExecutor):
             "risk_notes": [
                 "Real code mutation remains disabled.",
                 "Memory similarity is placeholder-only and not vector-search based.",
+            ],
+        }
+
+    def _build_phase5_review(self, task: PlannedTask, context: ExecutionContext) -> dict[str, Any]:
+        results_by_task = {result["task_id"]: result for result in context.prior_results}
+        suggestion = results_by_task.get("propose_phase5_actions", {}).get("output", {})
+        task_tree = results_by_task.get("compile_phase5_task_tree", {}).get("output", {})
+        historical_profiles = context.task_history.get("task_profiles", {})
+        attention_profiles = [
+            profile
+            for profile in historical_profiles.values()
+            if float(profile.get("success_rate", 1.0)) < 0.8 or float(profile.get("retry_rate", 0.0)) > 0.2
+        ]
+
+        recommended_next_actions = [
+            "Keep all Phase5 runs local and read-only until mutation policies are introduced.",
+            "Re-run tasks with weak historical success earlier in the schedule using local heuristics.",
+            "Persist task and workflow history after every run to improve future planning stability.",
+        ]
+        summary_lines = [
+            "# Phase5 Self-Optimization Review",
+            "",
+            f"- Goal: {context.goal_text}",
+            f"- Goal version: {context.goal_version}",
+            f"- Target directory: {context.target_project_dir}",
+            f"- Historical task profiles: {len(historical_profiles)}",
+            f"- Attention task profiles: {len(attention_profiles)}",
+            f"- Suggested action count: {len(suggestion.get('suggested_actions', []))}",
+            f"- Suggested subtree count: {len(task_tree.get('suggested_subtasks', []))}",
+            "",
+            "## Review Summary",
+            "- The workflow completed a local-only autonomous loop without external AI APIs.",
+            "- Parallel scan tasks and deterministic sample execution produced reusable metrics.",
+            "- Historical task outcomes can now influence future scheduling and retry budgets.",
+            "",
+            "## Recommended Next Actions",
+        ]
+        summary_lines.extend(f"- {item}" for item in recommended_next_actions)
+        summary_lines.extend(
+            [
+                "",
+                "## Local Optimization Notes",
+                "- Increase attention for tasks with low success or high retry rates.",
+                "- Keep generated code previews as artifacts only; do not mutate project files.",
+                "- Expand deterministic rule templates before any future live AI integration.",
+            ]
+        )
+
+        return {
+            "task_id": task.task_id,
+            "summary_markdown": "\n".join(summary_lines),
+            "recommended_next_actions": recommended_next_actions,
+            "optimization_notes": [
+                "Historical task profiles are used for local heuristic scheduling only.",
+                "No external APIs are called in Phase5 prototype mode.",
             ],
         }
 

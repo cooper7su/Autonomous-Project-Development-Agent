@@ -1,12 +1,12 @@
-"""Loop control for the Phase2 to Phase4 workflows.
+"""Loop control for the Phase2 to Phase5 workflows.
 
-Phase4 extends the loop controller with:
-- priority-aware scheduling,
-- parallel batch tracking,
-- bounded retry and stop logic,
-- decision traces for reporting and visualization.
+Phase5 extends the loop controller with:
+- local heuristic-aware scheduling,
+- richer retry and stop accounting,
+- decision traces for historical browsing,
+- lightweight adaptive prioritization support.
 
-Phase5 can extend this with adaptive replanning, approvals, and richer policies.
+Future phases can add replanning, approvals, and stronger policy controls.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def utc_now() -> str:
 
 @dataclass
 class LoopState:
-    """Loop state for Phase2 to Phase4 task orchestration."""
+    """Loop state for Phase2 to Phase5 task orchestration."""
 
     goal_id: str
     total_tasks: int
@@ -53,6 +53,8 @@ class LoopState:
             "failed_tasks": 0,
             "retryable_events": 0,
             "parallel_batches": 0,
+            "total_retries": 0,
+            "adaptive_priority_tasks": 0,
         }
     )
     updated_at: str = field(default_factory=utc_now)
@@ -92,6 +94,8 @@ class LoopState:
                         "failed_tasks": 0,
                         "retryable_events": 0,
                         "parallel_batches": 0,
+                        "total_retries": 0,
+                        "adaptive_priority_tasks": 0,
                     },
                 )
             ),
@@ -101,7 +105,7 @@ class LoopState:
 
 def initialize_loop_state(goal_id: str, total_tasks: int, phase: str = "Phase2") -> LoopState:
     """Create the initial loop state for a new run."""
-    max_iterations = max(12, total_tasks * 4)
+    max_iterations = max(12, total_tasks * (5 if phase == "Phase5" else 4))
     return LoopState(
         goal_id=goal_id,
         total_tasks=total_tasks,
@@ -133,7 +137,13 @@ def select_ready_tasks(loop_state: LoopState, tasks: list[PlannedTask]) -> list[
         and task.task_id not in failed
         and all(dependency in completed for dependency in task.depends_on)
     ]
-    pending.sort(key=lambda task: (-task.priority, task.order))
+    pending.sort(
+        key=lambda task: (
+            -task.priority,
+            -min(loop_state.retry_counts.get(task.task_id, 0), 1),
+            task.order,
+        )
+    )
     loop_state.ready_queue = [task.task_id for task in pending]
 
     if not pending:
@@ -171,8 +181,11 @@ def select_ready_tasks(loop_state: LoopState, tasks: list[PlannedTask]) -> list[
             "event": "batch_selected",
             "task_ids": loop_state.running_task_ids,
             "phase": loop_state.phase,
+            "ready_queue": list(loop_state.ready_queue),
         }
     )
+    if any(task.metadata.get("historical_heuristic") for task in batch):
+        loop_state.statistics["adaptive_priority_tasks"] = loop_state.statistics.get("adaptive_priority_tasks", 0) + len(batch)
     return batch
 
 
@@ -226,6 +239,7 @@ def apply_batch_to_loop(
             retry_count = loop_state.retry_counts.get(task.task_id, 0) + 1
             loop_state.retry_counts[task.task_id] = retry_count
             loop_state.statistics["retryable_events"] = loop_state.statistics.get("retryable_events", 0) + 1
+            loop_state.statistics["total_retries"] = loop_state.statistics.get("total_retries", 0) + 1
             if retry_count <= task.max_retries:
                 retryable_task_ids.append(task.task_id)
             else:
@@ -251,6 +265,7 @@ def apply_batch_to_loop(
             "task_ids": [task.task_id for task in tasks],
             "statuses": {task.task_id: analysis.status for task, analysis in zip(tasks, analyses)},
             "next_action": loop_state.next_action,
+            "statistics": dict(loop_state.statistics),
         }
     )
 

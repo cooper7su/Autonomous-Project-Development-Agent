@@ -1,17 +1,18 @@
-"""Result analysis for the Phase2 to Phase4 workflows.
+"""Result analysis and historical scoring for the Phase2 to Phase5 workflows.
 
-Phase4 extends the analysis layer with:
-- richer task-specific checks,
-- aggregate scoring and statistics,
-- visualization payloads for Streamlit,
-- explicit support for memory-aware autonomous review tasks.
+Phase5 extends the analysis layer with:
+- local task history and workflow history persistence,
+- task success/failure/retry statistics,
+- lightweight heuristic support for later scheduling adjustments,
+- richer visualization payloads for Streamlit.
 
-Phase5 can replace these lightweight checks with stronger quality gates,
-retrieval-augmented evaluation, and richer observability.
+Future phases can replace these deterministic checks with stronger evaluation,
+policy-aware scoring, and richer observability pipelines.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,52 @@ from .task_planning import PlannedTask
 def utc_now() -> str:
     """Return an ISO 8601 timestamp in UTC."""
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    """Read a JSON file if it exists and contains valid content."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    """Write deterministic JSON content to disk."""
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def task_history_path(state_dir: str | Path) -> Path:
+    """Return the task-history state file path."""
+    return Path(state_dir) / "task_history.json"
+
+
+def workflow_history_path(state_dir: str | Path) -> Path:
+    """Return the workflow-history state file path."""
+    return Path(state_dir) / "workflow_history.json"
+
+
+def load_task_history(state_dir: str | Path) -> dict[str, Any]:
+    """Load aggregated task execution history."""
+    payload = _read_json_file(task_history_path(state_dir)) or {
+        "updated_at": None,
+        "task_profile_count": 0,
+        "task_profiles": {},
+        "recent_runs": [],
+    }
+    payload["task_profile_count"] = len(payload.get("task_profiles", {}))
+    return payload
+
+
+def load_workflow_history(state_dir: str | Path) -> dict[str, Any]:
+    """Load summarized workflow run history."""
+    return _read_json_file(workflow_history_path(state_dir)) or {
+        "updated_at": None,
+        "run_count": 0,
+        "recent_runs": [],
+    }
 
 
 @dataclass(frozen=True)
@@ -86,7 +133,17 @@ def analyze_task_result(
         checks["total_tracked_files"] = result.output.get("total_tracked_files", -1)
         checks["suffix_count"] = len(result.output.get("suffix_counts", {}))
         passed = result.success and checks["total_tracked_files"] >= 0 and checks["suffix_count"] >= 0
-    elif task.task_id in {"propose_autonomous_stub", "propose_phase4_actions"}:
+    elif task.task_id == "execute_sample_python_task":
+        checks["dataset_count"] = result.output.get("dataset_count", -1)
+        checks["mean"] = result.output.get("mean", -1)
+        checks["script_preview_present"] = bool(result.output.get("script_preview", "").strip())
+        passed = result.success and checks["dataset_count"] > 0 and checks["mean"] >= 0 and checks["script_preview_present"]
+    elif task.task_id == "compile_phase5_task_tree":
+        summary_markdown = result.output.get("summary_markdown", "")
+        checks["summary_present"] = bool(summary_markdown.strip())
+        checks["suggested_subtask_count"] = len(result.output.get("suggested_subtasks", []))
+        passed = result.success and checks["summary_present"] and checks["suggested_subtask_count"] >= 1
+    elif task.task_id in {"propose_autonomous_stub", "propose_phase4_actions", "propose_phase5_actions"}:
         summary_markdown = result.output.get("summary_markdown", "")
         code_preview = result.output.get("generated_code_preview", "")
         code_artifact = result.output.get("generated_code_artifact")
@@ -112,13 +169,24 @@ def analyze_task_result(
             and checks["recommended_next_action_count"] >= 1
             and checks["mentions_phase5"]
         )
+    elif task.task_id == "draft_self_optimization_review":
+        summary_markdown = result.output.get("summary_markdown", "")
+        checks["summary_present"] = bool(summary_markdown.strip())
+        checks["recommended_next_action_count"] = len(result.output.get("recommended_next_actions", []))
+        checks["mentions_local_optimization"] = "optimization" in summary_markdown.lower()
+        passed = (
+            result.success
+            and checks["summary_present"]
+            and checks["recommended_next_action_count"] >= 1
+            and checks["mentions_local_optimization"]
+        )
     else:
         passed = result.success
 
     truthy_checks = sum(
         1
         for key, value in checks.items()
-        if key not in {"returncode", "duration_seconds"} and bool(value if not isinstance(value, int) else value >= 0)
+        if key not in {"returncode", "duration_seconds"} and bool(value if not isinstance(value, int | float) else value >= 0)
     )
     confidence_score = round(min(0.99, 0.2 + (truthy_checks / max(len(checks), 1)) * 0.75), 2) if passed else 0.35
     status = "passed" if passed else "retryable" if result.returncode != 0 or not checks.get("artifact_exists", False) else "failed"
@@ -130,12 +198,14 @@ def analyze_task_result(
         "execution_mode": task.execution_mode,
         "parallel_group": task.parallel_group,
         "duration_seconds": result.duration_seconds,
+        "attempt": result.attempt,
         "metrics": {
             "python_file_count": result.output.get("python_file_count"),
             "module_count": result.output.get("module_count"),
             "top_level_entry_count": result.output.get("top_level_entry_count"),
             "retrieved_goal_count": result.output.get("retrieved_goal_count"),
             "total_tracked_files": result.output.get("total_tracked_files"),
+            "dataset_count": result.output.get("dataset_count"),
         },
     }
 
@@ -164,6 +234,209 @@ def analyze_task_result(
     )
 
 
+def update_task_history(
+    state_dir: str | Path,
+    goal_payload: dict[str, Any],
+    task: PlannedTask,
+    result: TaskResult,
+    analysis: AnalysisReport,
+) -> dict[str, Any]:
+    """Update aggregated task execution history after one task attempt."""
+    path = Path(state_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    payload = load_task_history(path)
+    profiles = dict(payload.get("task_profiles", {}))
+    profile = dict(
+        profiles.get(
+            task.task_id,
+            {
+                "task_id": task.task_id,
+                "title": task.title,
+                "module_name": task.module_name,
+                "executor_type": task.executor_type,
+                "runs": 0,
+                "passed": 0,
+                "failed": 0,
+                "retryable": 0,
+                "total_retries": 0,
+                "total_duration_seconds": 0.0,
+                "average_duration_seconds": 0.0,
+                "average_confidence_score": 0.0,
+                "success_rate": 0.0,
+                "failure_rate": 0.0,
+                "retry_rate": 0.0,
+                "last_status": None,
+                "last_run_at": None,
+            },
+        )
+    )
+
+    profile["runs"] = int(profile.get("runs", 0)) + 1
+    if analysis.status == "passed":
+        profile["passed"] = int(profile.get("passed", 0)) + 1
+    elif analysis.status == "retryable":
+        profile["retryable"] = int(profile.get("retryable", 0)) + 1
+    else:
+        profile["failed"] = int(profile.get("failed", 0)) + 1
+
+    if result.attempt > 1:
+        profile["total_retries"] = int(profile.get("total_retries", 0)) + 1
+
+    profile["total_duration_seconds"] = round(
+        float(profile.get("total_duration_seconds", 0.0)) + float(result.duration_seconds),
+        4,
+    )
+    profile["average_duration_seconds"] = round(
+        profile["total_duration_seconds"] / max(profile["runs"], 1),
+        4,
+    )
+    profile["average_confidence_score"] = round(
+        (
+            float(profile.get("average_confidence_score", 0.0)) * (profile["runs"] - 1)
+            + float(analysis.confidence_score)
+        )
+        / max(profile["runs"], 1),
+        3,
+    )
+    profile["success_rate"] = round(profile["passed"] / max(profile["runs"], 1), 3)
+    profile["failure_rate"] = round(profile["failed"] / max(profile["runs"], 1), 3)
+    profile["retry_rate"] = round(profile["retryable"] / max(profile["runs"], 1), 3)
+    profile["last_status"] = analysis.status
+    profile["last_run_at"] = analysis.created_at
+    profile["last_goal_id"] = goal_payload.get("goal_id")
+    profile["last_phase"] = goal_payload.get("phase")
+
+    profiles[task.task_id] = profile
+    recent_runs = list(payload.get("recent_runs", []))
+    recent_runs.insert(
+        0,
+        {
+            "task_id": task.task_id,
+            "goal_id": goal_payload.get("goal_id"),
+            "phase": goal_payload.get("phase"),
+            "status": analysis.status,
+            "attempt": result.attempt,
+            "confidence_score": analysis.confidence_score,
+            "duration_seconds": result.duration_seconds,
+            "timestamp": analysis.created_at,
+        },
+    )
+
+    updated_payload = {
+        "updated_at": utc_now(),
+        "task_profile_count": len(profiles),
+        "task_profiles": profiles,
+        "recent_runs": recent_runs[:250],
+    }
+    _write_json_file(task_history_path(path), updated_payload)
+    return updated_payload
+
+
+def query_task_history(
+    state_dir: str | Path,
+    query_text: str | None = None,
+    *,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Query local task history using deterministic text matching."""
+    payload = load_task_history(state_dir)
+    normalized_query = " ".join((query_text or "").strip().split()).lower()
+    profiles = list(payload.get("task_profiles", {}).values())
+
+    if not normalized_query:
+        ordered_profiles = sorted(
+            profiles,
+            key=lambda entry: (-(entry.get("runs", 0)), entry.get("task_id", "")),
+        )
+        matches = ordered_profiles[:limit]
+    else:
+        matches = []
+        for entry in profiles:
+            haystack = " ".join(
+                [
+                    str(entry.get("task_id", "")),
+                    str(entry.get("title", "")),
+                    str(entry.get("module_name", "")),
+                    str(entry.get("executor_type", "")),
+                ]
+            ).lower()
+            if normalized_query in haystack:
+                matches.append(entry)
+        matches.sort(key=lambda entry: (-(entry.get("runs", 0)), entry.get("task_id", "")))
+        matches = matches[:limit]
+
+    return {
+        "query": normalized_query or None,
+        "match_count": len(matches),
+        "matches": matches,
+        "task_profile_count": payload.get("task_profile_count", 0),
+    }
+
+
+def update_workflow_history(state_dir: str | Path, final_report: dict[str, Any]) -> dict[str, Any]:
+    """Update workflow-run history after one autonomous run."""
+    path = Path(state_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    payload = load_workflow_history(path)
+    recent_runs = list(payload.get("recent_runs", []))
+    recent_runs.insert(
+        0,
+        {
+            "goal_id": final_report.get("goal", {}).get("goal_id"),
+            "phase": final_report.get("phase"),
+            "goal_version": final_report.get("goal", {}).get("goal_version", 1),
+            "overall_status": final_report.get("summary", {}).get("overall_status"),
+            "task_count": final_report.get("summary", {}).get("task_count", 0),
+            "passed_tasks": final_report.get("summary", {}).get("passed_tasks", 0),
+            "retryable_tasks": final_report.get("summary", {}).get("retryable_tasks", 0),
+            "total_duration_seconds": final_report.get("summary", {}).get("total_duration_seconds", 0.0),
+            "generated_at": final_report.get("generated_at"),
+        },
+    )
+    updated_payload = {
+        "updated_at": utc_now(),
+        "run_count": len(recent_runs),
+        "recent_runs": recent_runs[:200],
+    }
+    _write_json_file(workflow_history_path(path), updated_payload)
+    return updated_payload
+
+
+def query_workflow_history(
+    state_dir: str | Path,
+    query_text: str | None = None,
+    *,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Query workflow run history using deterministic text matching."""
+    payload = load_workflow_history(state_dir)
+    normalized_query = " ".join((query_text or "").strip().split()).lower()
+    recent_runs = list(payload.get("recent_runs", []))
+
+    if not normalized_query:
+        matches = recent_runs[:limit]
+    else:
+        matches = []
+        for entry in recent_runs:
+            haystack = " ".join(
+                [
+                    str(entry.get("goal_id", "")),
+                    str(entry.get("phase", "")),
+                    str(entry.get("overall_status", "")),
+                ]
+            ).lower()
+            if normalized_query in haystack:
+                matches.append(entry)
+        matches = matches[:limit]
+
+    return {
+        "query": normalized_query or None,
+        "match_count": len(matches),
+        "matches": matches,
+        "run_count": payload.get("run_count", 0),
+    }
+
+
 def build_final_report(
     goal_payload: dict[str, Any],
     plan_payload: dict[str, Any],
@@ -172,9 +445,14 @@ def build_final_report(
     *,
     phase: str = "Phase2",
     memory_state: dict[str, Any] | None = None,
+    task_history_state: dict[str, Any] | None = None,
+    workflow_history_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create the final structured report for the current workflow phase."""
     memory_state = memory_state or {}
+    task_history_state = task_history_state or {}
+    workflow_history_state = workflow_history_state or {}
+
     passed_tasks = sum(1 for record in task_records if record["analysis"]["status"] == "passed")
     failed_tasks = sum(1 for record in task_records if record["analysis"]["status"] == "failed")
     retryable_tasks = sum(1 for record in task_records if record["analysis"]["status"] == "retryable")
@@ -186,6 +464,7 @@ def build_final_report(
 
     executor_breakdown: dict[str, int] = {}
     duration_series: list[dict[str, Any]] = []
+    retry_series: list[dict[str, Any]] = []
     for record in task_records:
         executor_type = record["task"].get("executor_type", "unknown")
         executor_breakdown[executor_type] = executor_breakdown.get(executor_type, 0) + 1
@@ -196,6 +475,33 @@ def build_final_report(
                 "status": record["analysis"].get("status"),
             }
         )
+        retry_series.append(
+            {
+                "task_id": record["task"].get("task_id"),
+                "attempt": record["result"].get("attempt", 1),
+                "status": record["analysis"].get("status"),
+            }
+        )
+
+    task_success_rates = [
+        {
+            "task_id": profile.get("task_id"),
+            "success_rate": profile.get("success_rate", 0.0),
+            "retry_rate": profile.get("retry_rate", 0.0),
+            "runs": profile.get("runs", 0),
+        }
+        for profile in task_history_state.get("task_profiles", {}).values()
+    ]
+    task_success_rates.sort(key=lambda entry: (-float(entry.get("runs", 0)), entry.get("task_id", "")))
+
+    self_optimization = {
+        "heuristic_adjustments": plan_payload.get("heuristic_adjustments", []),
+        "attention_tasks": [
+            profile
+            for profile in task_history_state.get("task_profiles", {}).values()
+            if float(profile.get("success_rate", 1.0)) < 0.8 or float(profile.get("retry_rate", 0.0)) > 0.2
+        ][:10],
+    }
 
     visualization = {
         "task_statuses": [
@@ -215,12 +521,16 @@ def build_final_report(
         },
         "dependency_edges": plan_payload.get("dependency_edges", []),
         "duration_series": duration_series,
+        "retry_series": retry_series,
         "executor_breakdown": executor_breakdown,
         "memory_overview": {
             "goal_count": memory_state.get("goal_count", 0),
             "vector_count": memory_state.get("vector_count", 0),
             "retrieved_goal_count": memory_state.get("retrieved_goal_count", 0),
+            "task_profile_count": task_history_state.get("task_profile_count", 0),
+            "workflow_run_count": workflow_history_state.get("run_count", 0),
         },
+        "task_success_rates": task_success_rates[:15],
     }
 
     return {
@@ -233,6 +543,7 @@ def build_final_report(
             "task_count": plan_payload.get("task_count", 0),
             "parallel_task_count": plan_payload.get("parallel_task_count", 0),
             "executor_breakdown": plan_payload.get("executor_breakdown", {}),
+            "heuristic_adjustments": plan_payload.get("heuristic_adjustments", []),
         },
         "summary": {
             "overall_status": loop_state_payload.get("overall_status", "unknown"),
@@ -250,8 +561,19 @@ def build_final_report(
             "executor_breakdown": executor_breakdown,
             "completed_batches": loop_state_payload.get("completed_batches", 0),
             "parallel_task_count": plan_payload.get("parallel_task_count", 0),
+            "task_profile_count": task_history_state.get("task_profile_count", 0),
+            "workflow_run_count": workflow_history_state.get("run_count", 0),
         },
         "memory_state": memory_state,
+        "task_history": {
+            "task_profile_count": task_history_state.get("task_profile_count", 0),
+            "recent_runs": task_history_state.get("recent_runs", [])[:20],
+        },
+        "workflow_history": {
+            "run_count": workflow_history_state.get("run_count", 0),
+            "recent_runs": workflow_history_state.get("recent_runs", [])[:20],
+        },
+        "self_optimization": self_optimization,
         "tasks": task_records,
         "loop_state": loop_state_payload,
         "visualization": visualization,

@@ -8,6 +8,7 @@ Phase5 extends the analysis layer with:
 
 Future phases can replace these deterministic checks with stronger evaluation,
 policy-aware scoring, and richer observability pipelines.
+AI-Phase1 extends reporting with task-level AI routing metadata.
 """
 
 from __future__ import annotations
@@ -104,6 +105,10 @@ def analyze_task_result(
         "artifact_exists": bool(result.artifact_path and Path(result.artifact_path).exists()),
         "target_project_dir": context.target_project_dir,
         "executor_type": task.executor_type,
+        "actual_executor_type": result.executor_type,
+        "requested_executor_type": result.requested_executor_type or task.executor_type,
+        "task_use_ai": task.use_ai,
+        "ai_enabled": context.enable_ai,
         "duration_seconds": result.duration_seconds,
     }
     operation = task.metadata.get("operation")
@@ -183,6 +188,10 @@ def analyze_task_result(
     else:
         passed = result.success
 
+    if task.use_ai and context.enable_ai:
+        checks["ai_metadata_present"] = bool(result.ai_metadata or result.output.get("ai_execution"))
+        passed = passed and checks["ai_metadata_present"]
+
     truthy_checks = sum(
         1
         for key, value in checks.items()
@@ -194,9 +203,13 @@ def analyze_task_result(
         "task_id": task.task_id,
         "status": status,
         "executor_type": task.executor_type,
+        "actual_executor_type": result.executor_type,
         "priority": task.priority,
         "execution_mode": task.execution_mode,
         "parallel_group": task.parallel_group,
+        "use_ai": task.use_ai,
+        "ai_enabled": context.enable_ai,
+        "ai_provider": context.ai_provider,
         "duration_seconds": result.duration_seconds,
         "attempt": result.attempt,
         "metrics": {
@@ -265,8 +278,11 @@ def update_task_history(
                 "success_rate": 0.0,
                 "failure_rate": 0.0,
                 "retry_rate": 0.0,
+                "use_ai": bool(task.use_ai),
                 "last_status": None,
                 "last_run_at": None,
+                "last_actual_executor_type": None,
+                "last_requested_executor_type": None,
             },
         )
     )
@@ -305,6 +321,9 @@ def update_task_history(
     profile["last_run_at"] = analysis.created_at
     profile["last_goal_id"] = goal_payload.get("goal_id")
     profile["last_phase"] = goal_payload.get("phase")
+    profile["use_ai"] = bool(task.use_ai)
+    profile["last_actual_executor_type"] = result.executor_type
+    profile["last_requested_executor_type"] = result.requested_executor_type or task.executor_type
 
     profiles[task.task_id] = profile
     recent_runs = list(payload.get("recent_runs", []))
@@ -463,11 +482,20 @@ def build_final_report(
     )
 
     executor_breakdown: dict[str, int] = {}
+    actual_executor_breakdown: dict[str, int] = {}
     duration_series: list[dict[str, Any]] = []
     retry_series: list[dict[str, Any]] = []
+    ai_task_count = 0
+    ai_executed_task_count = 0
     for record in task_records:
         executor_type = record["task"].get("executor_type", "unknown")
         executor_breakdown[executor_type] = executor_breakdown.get(executor_type, 0) + 1
+        actual_executor_type = record["result"].get("executor_type", executor_type)
+        actual_executor_breakdown[actual_executor_type] = actual_executor_breakdown.get(actual_executor_type, 0) + 1
+        if record["task"].get("use_ai"):
+            ai_task_count += 1
+        if actual_executor_type == "ai_executor":
+            ai_executed_task_count += 1
         duration_series.append(
             {
                 "task_id": record["task"].get("task_id"),
@@ -509,8 +537,10 @@ def build_final_report(
                 "task_id": record["task"]["task_id"],
                 "status": record["analysis"]["status"],
                 "executor_type": record["task"]["executor_type"],
+                "actual_executor_type": record["result"].get("executor_type"),
                 "priority": record["task"].get("priority"),
                 "parallel_group": record["task"].get("parallel_group"),
+                "use_ai": record["task"].get("use_ai", False),
             }
             for record in task_records
         ],
@@ -519,10 +549,16 @@ def build_final_report(
             "failed": failed_tasks,
             "retryable": retryable_tasks,
         },
+        "ai_summary": {
+            "goal_use_ai": bool(goal_payload.get("use_ai", False)),
+            "ai_task_count": ai_task_count,
+            "ai_executed_task_count": ai_executed_task_count,
+        },
         "dependency_edges": plan_payload.get("dependency_edges", []),
         "duration_series": duration_series,
         "retry_series": retry_series,
         "executor_breakdown": executor_breakdown,
+        "actual_executor_breakdown": actual_executor_breakdown,
         "memory_overview": {
             "goal_count": memory_state.get("goal_count", 0),
             "vector_count": memory_state.get("vector_count", 0),
@@ -552,6 +588,9 @@ def build_final_report(
             "failed_tasks": failed_tasks,
             "retryable_tasks": retryable_tasks,
             "human_intervention_required": loop_state_payload.get("human_intervention_required", False),
+            "goal_use_ai": bool(goal_payload.get("use_ai", False)),
+            "ai_task_count": ai_task_count,
+            "ai_executed_task_count": ai_executed_task_count,
             "total_duration_seconds": total_duration,
             "average_confidence_score": average_confidence,
         },
@@ -559,8 +598,11 @@ def build_final_report(
             "total_duration_seconds": total_duration,
             "average_confidence_score": average_confidence,
             "executor_breakdown": executor_breakdown,
+            "actual_executor_breakdown": actual_executor_breakdown,
             "completed_batches": loop_state_payload.get("completed_batches", 0),
             "parallel_task_count": plan_payload.get("parallel_task_count", 0),
+            "ai_task_count": ai_task_count,
+            "ai_executed_task_count": ai_executed_task_count,
             "task_profile_count": task_history_state.get("task_profile_count", 0),
             "workflow_run_count": workflow_history_state.get("run_count", 0),
         },

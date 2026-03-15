@@ -5,6 +5,7 @@ Phase5 extends the earlier scaffold with:
 - goal versioning plus parent/child tracking,
 - lightweight complexity assessment,
 - local memory querying for historical goal retrieval.
+- AI-Phase1 adds goal-level AI flags and prompt-template placeholders.
 
 Future phases can replace these deterministic placeholders with stronger
 retrieval, clustering, policy-aware ranking, and cross-project memory sharing.
@@ -91,6 +92,9 @@ class ProjectGoal:
     constraints: list[str]
     created_at: str
     priority: str = "medium"
+    use_ai: bool = False
+    ai_provider: str = "disabled"
+    ai_prompt_template: str | None = None
     dependencies: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
@@ -120,6 +124,9 @@ class ProjectGoal:
             constraints=list(payload.get("constraints", [])),
             created_at=payload["created_at"],
             priority=payload.get("priority", "medium"),
+            use_ai=bool(payload.get("use_ai", False)),
+            ai_provider=payload.get("ai_provider", "disabled"),
+            ai_prompt_template=payload.get("ai_prompt_template"),
             dependencies=list(payload.get("dependencies", [])),
             notes=list(payload.get("notes", [])),
             tags=list(payload.get("tags", [])),
@@ -202,6 +209,7 @@ def build_project_goal(
     *,
     phase: str = "Phase2",
     priority: str = "medium",
+    enable_ai: bool = False,
     dependencies: list[str] | None = None,
     enable_memory: bool | None = None,
     state_dir: str | Path | None = None,
@@ -254,13 +262,15 @@ def build_project_goal(
 
     constraints = [
         "Only safe local filesystem inspection is allowed.",
-        "No production Codex, GPT, or OpenAI API execution is enabled.",
+        "No production Codex, GPT, or OpenAI API execution is enabled by default.",
         "MATLAB and other external toolchains remain documented integration points only.",
     ]
     if phase in {"Phase4", "Phase5"}:
         constraints.append("Autonomous code generation remains a placeholder and must not mutate project files.")
     if phase == "Phase5":
         constraints.append("All optimization logic must be local, deterministic, and safe to rerun.")
+    if enable_ai:
+        constraints.append("AI mode uses only local placeholder execution in AI-Phase1.")
 
     notes = [
         f"This goal is configured for the {phase} prototype workflow.",
@@ -268,9 +278,13 @@ def build_project_goal(
         f"Goal version: {lineage['goal_version']}.",
         f"Complexity level: {complexity_level}.",
     ]
+    if enable_ai:
+        notes.append("AI-Phase1 is enabled: AIExecutor routes AI-capable tasks through safe local placeholders.")
     notes.extend(lineage["retrieval_notes"])
 
     tags = ["python", "local-analysis", phase.lower(), complexity_level]
+    if enable_ai:
+        tags.extend(["ai-enabled", "ai-placeholder"])
     if phase == "Phase4":
         tags.extend(["memory-aware", "task-tree", "autonomous-review"])
     if phase == "Phase5":
@@ -289,6 +303,9 @@ def build_project_goal(
         constraints=constraints,
         created_at=utc_now(),
         priority=priority if priority in PRIORITY_SCORES else "medium",
+        use_ai=enable_ai,
+        ai_provider="local_placeholder" if enable_ai else "disabled",
+        ai_prompt_template="ai_phase1_goal_prompt_v1" if enable_ai else None,
         dependencies=list(dependencies or []),
         notes=notes,
         tags=tags,
@@ -300,6 +317,23 @@ def build_project_goal(
         child_goal_ids=list(lineage["child_goal_ids"]),
         retrieval_notes=list(lineage["retrieval_notes"]),
         complexity_level=complexity_level,
+    )
+
+
+def render_goal_ai_prompt(goal: ProjectGoal) -> str:
+    """Render a safe AI prompt preview for the current goal.
+
+    The returned text is for logging, visualization, and future provider
+    integration boundaries only. AI-Phase1 does not send it to external APIs.
+    """
+
+    return (
+        f"[{goal.phase}] Goal={goal.normalized_goal}; "
+        f"target_dir={goal.target_project_dir}; "
+        f"priority={goal.priority}; "
+        f"goal_version={goal.goal_version}; "
+        f"use_ai={goal.use_ai}; "
+        "instruction=produce a safe read-only planning or code suggestion."
     )
 
 
@@ -345,6 +379,8 @@ def persist_goal_memory(state_dir: str | Path, goal: ProjectGoal) -> dict[str, A
         "normalized_goal": goal.normalized_goal,
         "target_project_dir": goal.target_project_dir,
         "priority": goal.priority,
+        "use_ai": goal.use_ai,
+        "ai_provider": goal.ai_provider,
         "dependencies": goal.dependencies,
         "created_at": goal.created_at,
         "memory_keys": goal.memory_keys,
@@ -367,6 +403,7 @@ def persist_goal_memory(state_dir: str | Path, goal: ProjectGoal) -> dict[str, A
         "created_at": goal.created_at,
         "phase": goal.phase,
         "complexity_level": goal.complexity_level,
+        "use_ai": goal.use_ai,
     }
 
     goals = [entry for entry in memory_payload.get("goals", []) if entry.get("goal_id") != goal.goal_id]
@@ -416,7 +453,9 @@ def load_memory_status(state_dir: str | Path) -> dict[str, Any]:
 
     phase_breakdown: dict[str, int] = {}
     complexity_breakdown: dict[str, int] = {}
+    ai_provider_breakdown: dict[str, int] = {}
     relationship_count = 0
+    ai_goal_count = 0
     for entry in memory_payload.get("goals", []):
         phase = entry.get("phase", "unknown")
         complexity = entry.get("complexity_level", "unknown")
@@ -424,6 +463,10 @@ def load_memory_status(state_dir: str | Path) -> dict[str, Any]:
         complexity_breakdown[complexity] = complexity_breakdown.get(complexity, 0) + 1
         if entry.get("parent_goal_id"):
             relationship_count += 1
+        if entry.get("use_ai"):
+            ai_goal_count += 1
+            provider = entry.get("ai_provider", "unknown")
+            ai_provider_breakdown[provider] = ai_provider_breakdown.get(provider, 0) + 1
 
     return {
         "updated_at": max(
@@ -443,6 +486,8 @@ def load_memory_status(state_dir: str | Path) -> dict[str, Any]:
         "phase_breakdown": phase_breakdown,
         "complexity_breakdown": complexity_breakdown,
         "relationship_count": relationship_count,
+        "ai_goal_count": ai_goal_count,
+        "ai_provider_breakdown": ai_provider_breakdown,
     }
 
 
@@ -484,6 +529,7 @@ def retrieve_memory_context(
                 "complexity_level": entry.get("complexity_level", "unknown"),
                 "similarity_score": total_score,
                 "created_at": entry.get("created_at"),
+                "use_ai": bool(entry.get("use_ai", False)),
             }
         )
 
@@ -506,6 +552,7 @@ def retrieve_memory_context(
         "retrieved_goal_count": len(limited_matches),
         "top_match_goal_id": limited_matches[0]["goal_id"] if limited_matches else None,
         "memory_scope": "local_placeholder",
+        "ai_goal_count": status.get("ai_goal_count", 0),
     }
 
 

@@ -9,6 +9,8 @@ Phase5 extends the earlier executor layer with:
 
 Phase5 can replace these placeholders with real model calls, stronger
 isolation, approval-aware policies, and tool-specific execution sandboxes.
+AI-Phase1 adds a generic AIExecutor wrapper that keeps all AI behavior local
+and deterministic while exposing a future provider boundary.
 """
 
 from __future__ import annotations
@@ -21,7 +23,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
 
-from .task_planning import PlannedTask
+from .goal_framework import ProjectGoal
+from .task_planning import PlannedTask, is_ai_executor_type, render_task_prompt
 
 
 def utc_now() -> str:
@@ -45,10 +48,14 @@ class ExecutionContext:
     logs_dir: str
     artifacts_dir: str
     goal_version: int = 1
+    goal_payload: dict[str, Any] = field(default_factory=dict)
+    enable_ai: bool = False
+    ai_provider: str = "disabled"
     prior_results: list[dict[str, Any]] = field(default_factory=list)
     memory_state: dict[str, Any] = field(default_factory=dict)
     task_history: dict[str, Any] = field(default_factory=dict)
     plan_summary: dict[str, Any] = field(default_factory=dict)
+    ai_execution_state: dict[str, Any] = field(default_factory=dict)
     max_parallel_tasks: int = 2
 
     def to_dict(self) -> dict[str, Any]:
@@ -72,11 +79,13 @@ class TaskResult:
     duration_seconds: float
     output: dict[str, Any]
     output_text: str
+    requested_executor_type: str | None = None
     artifact_path: str | None = None
     error: str | None = None
     statistics: dict[str, Any] = field(default_factory=dict)
     visualization_data: dict[str, Any] = field(default_factory=dict)
     callback_events: list[dict[str, Any]] = field(default_factory=list)
+    ai_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result into JSON-friendly data."""
@@ -979,8 +988,87 @@ class GPTExecutor(BaseExecutor):
         }
 
 
-def build_executor(executor_type: str) -> BaseExecutor:
-    """Return the executor implementation for a planned task."""
+class AIExecutor(BaseExecutor):
+    """Wrap AI-capable placeholder executors behind one AI-Phase1 boundary.
+
+    AI-Phase1 does not call external providers. Instead, this wrapper routes
+    AI-marked tasks to the existing safe local placeholder executors and
+    annotates their results with prompt previews and AI execution metadata.
+    """
+
+    executor_type = "ai_executor"
+
+    def __init__(self, delegated_executor_type: str) -> None:
+        self.delegated_executor_type = delegated_executor_type
+
+    def execute(self, task: PlannedTask, context: ExecutionContext, attempt: int = 1) -> TaskResult:
+        delegated_executor = _build_direct_executor(self.delegated_executor_type)
+        delegated_result = delegated_executor.execute(task, context, attempt=attempt)
+        goal = (
+            ProjectGoal.from_dict(context.goal_payload)
+            if context.goal_payload
+            else ProjectGoal(
+                goal_id=context.goal_id,
+                phase=context.phase,
+                raw_goal=context.goal_text,
+                normalized_goal=context.goal_text,
+                target_project_dir=context.target_project_dir,
+                success_criteria=[],
+                constraints=[],
+                created_at=utc_now(),
+                goal_version=context.goal_version,
+            )
+        )
+        prompt_preview = render_task_prompt(task, goal, context.memory_state)
+        ai_metadata = {
+            "enabled": context.enable_ai,
+            "provider": context.ai_provider,
+            "delegated_executor_type": self.delegated_executor_type,
+            "task_use_ai": task.use_ai,
+            "task_prompt_template": task.ai_prompt_template or task.prompt_template,
+            "task_prompt_preview": prompt_preview,
+            "mode": "local_placeholder",
+            "external_api_called": False,
+        }
+        output = dict(delegated_result.output)
+        output["ai_execution"] = ai_metadata
+        statistics = dict(delegated_result.statistics)
+        statistics["delegated_executor_type"] = self.delegated_executor_type
+        visualization_data = dict(delegated_result.visualization_data)
+        visualization_data.update(
+            {
+                "actual_executor_type": self.executor_type,
+                "delegated_executor_type": self.delegated_executor_type,
+                "use_ai": task.use_ai,
+                "ai_enabled": context.enable_ai,
+            }
+        )
+        return TaskResult(
+            task_id=delegated_result.task_id,
+            module_name=delegated_result.module_name,
+            title=delegated_result.title,
+            executor_type=self.executor_type,
+            requested_executor_type=self.delegated_executor_type,
+            attempt=delegated_result.attempt,
+            success=delegated_result.success,
+            returncode=delegated_result.returncode,
+            started_at=delegated_result.started_at,
+            finished_at=delegated_result.finished_at,
+            duration_seconds=delegated_result.duration_seconds,
+            output=output,
+            output_text=delegated_result.output_text,
+            artifact_path=delegated_result.artifact_path,
+            error=delegated_result.error,
+            statistics=statistics,
+            visualization_data=visualization_data,
+            callback_events=delegated_result.callback_events,
+            ai_metadata=ai_metadata,
+        )
+
+
+def _build_direct_executor(executor_type: str) -> BaseExecutor:
+    """Return the non-wrapped executor implementation for a planned task."""
+
     if executor_type == "local_python":
         return LocalPythonExecutor()
     if executor_type == "placeholder_agent":
@@ -990,6 +1078,14 @@ def build_executor(executor_type: str) -> BaseExecutor:
     if executor_type == "gpt_placeholder":
         return GPTExecutor()
     raise ValueError(f"Unsupported executor type: {executor_type}")
+
+
+def build_executor(task: PlannedTask, context: ExecutionContext) -> BaseExecutor:
+    """Return the executor implementation for a planned task."""
+
+    if task.use_ai and context.enable_ai and is_ai_executor_type(task.executor_type):
+        return AIExecutor(task.executor_type)
+    return _build_direct_executor(task.executor_type)
 
 
 def execute_task_batch(
@@ -1007,7 +1103,7 @@ def execute_task_batch(
     if len(ordered_tasks) == 1 or all(task.execution_mode != "parallel" for task in ordered_tasks):
         results: list[TaskResult] = []
         for task in ordered_tasks:
-            result = build_executor(task.executor_type).execute(
+            result = build_executor(task, context).execute(
                 task,
                 context,
                 attempt=attempt_map.get(task.task_id, 1),
@@ -1021,7 +1117,7 @@ def execute_task_batch(
     with ThreadPoolExecutor(max_workers=min(context.max_parallel_tasks, len(ordered_tasks))) as pool:
         future_map = {
             pool.submit(
-                build_executor(task.executor_type).execute,
+                build_executor(task, context).execute,
                 task,
                 context,
                 attempt_map.get(task.task_id, 1),

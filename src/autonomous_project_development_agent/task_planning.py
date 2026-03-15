@@ -8,6 +8,7 @@ Phase5 extends the earlier planning layer with:
 
 Future phases can replace these deterministic templates with adaptive
 replanning, approval-aware routing, and richer project-specific planners.
+AI-Phase1 adds task-level AI flags and prompt-template placeholders.
 """
 
 from __future__ import annotations
@@ -15,7 +16,16 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .goal_framework import ProjectGoal, utc_now
+from .goal_framework import ProjectGoal, render_goal_ai_prompt, utc_now
+
+
+AI_EXECUTOR_TYPES = {"placeholder_agent", "codex_placeholder", "gpt_placeholder"}
+
+
+def is_ai_executor_type(executor_type: str) -> bool:
+    """Return True when an executor type represents an AI-capable route."""
+
+    return executor_type in AI_EXECUTOR_TYPES
 
 
 @dataclass(frozen=True)
@@ -31,6 +41,8 @@ class PlannedTask:
     prompt_template: str
     expected_output: str
     verification_hint: str
+    use_ai: bool = False
+    ai_prompt_template: str | None = None
     max_retries: int = 1
     priority: int = 50
     execution_mode: str = "sequential"
@@ -51,9 +63,11 @@ class PlannedTask:
             order=int(payload["order"]),
             module_name=payload["module_name"],
             executor_type=payload["executor_type"],
+            use_ai=bool(payload.get("use_ai", is_ai_executor_type(payload["executor_type"]))),
             title=payload["title"],
             description=payload["description"],
             prompt_template=payload["prompt_template"],
+            ai_prompt_template=payload.get("ai_prompt_template"),
             expected_output=payload["expected_output"],
             verification_hint=payload["verification_hint"],
             max_retries=int(payload.get("max_retries", 1)),
@@ -69,11 +83,13 @@ class PlannedTask:
 def render_task_prompt(task: PlannedTask, goal: ProjectGoal, memory_status: dict[str, Any] | None = None) -> str:
     """Render a dynamic prompt template for placeholder agent executors."""
     memory_status = memory_status or {}
-    return task.prompt_template.format(
+    rendered_prompt = (task.ai_prompt_template or task.prompt_template).format(
         goal=goal.normalized_goal,
         target_dir=goal.target_project_dir,
         phase=goal.phase,
         priority=goal.priority,
+        use_ai=goal.use_ai,
+        ai_provider=goal.ai_provider,
         goal_version=goal.goal_version,
         parent_goal_id=goal.parent_goal_id or "none",
         complexity_level=goal.complexity_level,
@@ -83,6 +99,13 @@ def render_task_prompt(task: PlannedTask, goal: ProjectGoal, memory_status: dict
         memory_match_count=memory_status.get("retrieved_goal_count", len(memory_status.get("matches", []))),
         task_profile_count=memory_status.get("task_profile_count", 0),
     )
+    if task.use_ai:
+        return (
+            f"{render_goal_ai_prompt(goal)}\n"
+            f"ai_task={task.task_id}; ai_enabled={goal.use_ai}; ai_provider={goal.ai_provider}\n"
+            f"{rendered_prompt}"
+        )
+    return rendered_prompt
 
 
 def generate_task_plan(
@@ -100,7 +123,24 @@ def generate_task_plan(
         tasks = _generate_phase3_task_plan(goal)
     else:
         tasks = _generate_phase2_task_plan(goal)
-    return _apply_historical_task_heuristics(tasks, task_history or {}, phase=resolved_phase)
+    tasks = _apply_historical_task_heuristics(tasks, task_history or {}, phase=resolved_phase)
+    return _apply_ai_task_defaults(tasks)
+
+
+def _apply_ai_task_defaults(tasks: list[PlannedTask]) -> list[PlannedTask]:
+    """Ensure AI-capable tasks carry explicit AI metadata."""
+
+    adapted_tasks: list[PlannedTask] = []
+    for task in tasks:
+        cloned_payload = task.to_dict()
+        cloned_payload["use_ai"] = bool(cloned_payload.get("use_ai", False) or is_ai_executor_type(task.executor_type))
+        if cloned_payload["use_ai"] and not cloned_payload.get("ai_prompt_template"):
+            cloned_payload["ai_prompt_template"] = (
+                f"{cloned_payload['prompt_template']} "
+                "Use ai_provider={ai_provider} in safe placeholder mode and do not mutate project files."
+            )
+        adapted_tasks.append(PlannedTask.from_dict(cloned_payload))
+    return adapted_tasks
 
 
 def _generate_phase2_task_plan(goal: ProjectGoal) -> list[PlannedTask]:
@@ -787,13 +827,17 @@ def build_plan_payload(goal: ProjectGoal, tasks: list[PlannedTask], phase: str |
     """Serialize the current plan for persistence and CLI display."""
     resolved_phase = phase or goal.phase
     parallel_task_count = sum(1 for task in tasks if task.execution_mode == "parallel")
+    ai_task_count = sum(1 for task in tasks if task.use_ai)
 
     executor_breakdown: dict[str, int] = {}
+    ai_executor_breakdown: dict[str, int] = {}
     parallel_groups: dict[str, list[str]] = {}
     dependency_edges: list[dict[str, str]] = []
     heuristic_adjustments: list[dict[str, Any]] = []
     for task in tasks:
         executor_breakdown[task.executor_type] = executor_breakdown.get(task.executor_type, 0) + 1
+        if task.use_ai:
+            ai_executor_breakdown[task.executor_type] = ai_executor_breakdown.get(task.executor_type, 0) + 1
         if task.parallel_group:
             parallel_groups.setdefault(task.parallel_group, []).append(task.task_id)
         for dependency in task.depends_on:
@@ -816,12 +860,16 @@ def build_plan_payload(goal: ProjectGoal, tasks: list[PlannedTask], phase: str |
         "goal_version": goal.goal_version,
         "complexity_level": goal.complexity_level,
         "target_project_dir": goal.target_project_dir,
+        "use_ai": goal.use_ai,
+        "ai_provider": goal.ai_provider,
         "task_count": len(tasks),
+        "ai_task_count": ai_task_count,
         "parallel_task_count": parallel_task_count,
         "sequential_task_count": len(tasks) - parallel_task_count,
         "retry_budget_total": sum(task.max_retries for task in tasks),
         "max_parallel_tasks": max(len(task_ids) for task_ids in parallel_groups.values()) if parallel_groups else 1,
         "executor_breakdown": executor_breakdown,
+        "ai_executor_breakdown": ai_executor_breakdown,
         "parallel_groups": parallel_groups,
         "dependency_edges": dependency_edges,
         "heuristic_adjustments": heuristic_adjustments,

@@ -588,6 +588,7 @@ def build_final_report(
             "parallel_task_count": plan_payload.get("parallel_task_count", 0),
             "executor_breakdown": plan_payload.get("executor_breakdown", {}),
             "heuristic_adjustments": plan_payload.get("heuristic_adjustments", []),
+            "planning": plan_payload.get("planning", {}),
         },
         "summary": {
             "overall_status": loop_state_payload.get("overall_status", "unknown"),

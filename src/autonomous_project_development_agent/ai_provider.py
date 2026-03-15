@@ -115,30 +115,61 @@ class LocalTemplateProvider(BaseAIProvider):
     def generate(self, request: AIProviderRequest) -> AIProviderResponse:
         started_at = utc_now()
         started_clock = perf_counter()
-        content = (
-            "Local template provider response.\n"
-            f"Phase: {request.phase}\n"
-            f"Task: {request.task_id}\n"
-            f"Goal: {request.goal_id}\n"
-            f"Target: {request.target_project_dir}\n"
-            "Mode: read-only placeholder generation.\n"
-            "Next step: keep results as preview artifacts until a later phase enables reviewed live provider calls."
-        )
+        request_kind = str(request.metadata.get("request_kind", "task_execution"))
+        if request_kind == "task_planning":
+            recommended_adjustments = [
+                "Prioritize safe project-scan tasks before review-oriented tasks.",
+                "Increase retry budget for AI-capable tasks by one attempt.",
+                "Keep read-only local scan tasks eligible for parallel grouping where dependencies allow it.",
+            ]
+            content = "\n".join(
+                [
+                    "Local template provider planning response.",
+                    f"Phase: {request.phase}",
+                    f"Goal: {request.goal_id}",
+                    "Planning strategy: scan first, then synthesize, then review.",
+                    "Recommended adjustments:",
+                    *[f"- {item}" for item in recommended_adjustments],
+                ]
+            )
+            metadata = {
+                "request_kind": request_kind,
+                "planning_strategy": "scan_first_parallel_then_review",
+                "recommended_parallel_batch": "project_scan",
+                "recommended_adjustments": recommended_adjustments,
+                "boost_ai_tasks": True,
+                "boost_memory_tasks": True,
+                "allow_live_calls": self.config.allow_live_calls,
+                "request_prompt_length": len(request.prompt),
+                "system_prompt_length": len(request.system_prompt),
+            }
+        else:
+            content = (
+                "Local template provider response.\n"
+                f"Phase: {request.phase}\n"
+                f"Task: {request.task_id}\n"
+                f"Goal: {request.goal_id}\n"
+                f"Target: {request.target_project_dir}\n"
+                "Mode: read-only placeholder generation.\n"
+                "Next step: keep results as preview artifacts until a later phase enables reviewed live provider calls."
+            )
+            metadata = {
+                "request_kind": request_kind,
+                "request_prompt_length": len(request.prompt),
+                "system_prompt_length": len(request.system_prompt),
+                "allow_live_calls": self.config.allow_live_calls,
+            }
         latency_seconds = round(perf_counter() - started_clock, 4)
         return AIProviderResponse(
             provider_name=self.provider_name,
             model_name="local-template-v1",
             success=True,
-            mode="local_template",
+            mode="local_template_planning" if request_kind == "task_planning" else "local_template",
             content=content,
             started_at=started_at,
             finished_at=utc_now(),
             latency_seconds=latency_seconds,
-            metadata={
-                "request_prompt_length": len(request.prompt),
-                "system_prompt_length": len(request.system_prompt),
-                "allow_live_calls": self.config.allow_live_calls,
-            },
+            metadata=metadata,
         )
 
 
@@ -155,25 +186,83 @@ class OpenAIProvider(BaseAIProvider):
     def generate(self, request: AIProviderRequest) -> AIProviderResponse:
         started_at = utc_now()
         started_clock = perf_counter()
+        request_kind = str(request.metadata.get("request_kind", "task_execution"))
         live_call_ready = self.config.allow_live_calls and self.config.has_openai_api_key
-        if live_call_ready:
+        if request_kind == "task_planning":
+            if live_call_ready:
+                mode = "openai_planning_live_disabled_by_phase"
+                content = (
+                    "OpenAI planning provider is configured, but AI-Phase3 keeps live planning calls disabled. "
+                    "Use this provider response as a safe placeholder."
+                )
+            elif self.config.has_openai_api_key:
+                mode = "openai_planning_configured_placeholder"
+                content = (
+                    "OpenAI planning provider is configured with credentials, but live calls remain disabled. "
+                    "Returning deterministic planning guidance."
+                )
+            else:
+                mode = "openai_planning_unconfigured_placeholder"
+                content = (
+                    "OpenAI planning provider selected without API credentials. "
+                    "Returning deterministic planning guidance and keeping the workflow local."
+                )
+            recommended_adjustments = [
+                "Group independent scan tasks for earlier feedback.",
+                "Promote AI-capable synthesis and review tasks after local artifact generation.",
+                "Record provider planning rationale in the persisted plan for auditability.",
+            ]
+            metadata = {
+                "request_kind": request_kind,
+                "planning_strategy": "provider_guided_placeholder",
+                "recommended_parallel_batch": "project_scan",
+                "recommended_adjustments": recommended_adjustments,
+                "boost_ai_tasks": True,
+                "boost_memory_tasks": True,
+                "has_openai_api_key": self.config.has_openai_api_key,
+                "allow_live_calls": self.config.allow_live_calls,
+                "timeout_seconds": self.config.timeout_seconds,
+                "max_retries": self.config.max_retries,
+            }
+        elif live_call_ready:
             mode = "openai_live_disabled_by_phase"
             content = (
                 "OpenAI provider is configured, but AI-Phase2 keeps live calls disabled. "
                 "Use this response as a placeholder until a later phase introduces approved network execution."
             )
+            metadata = {
+                "request_kind": request_kind,
+                "has_openai_api_key": self.config.has_openai_api_key,
+                "allow_live_calls": self.config.allow_live_calls,
+                "timeout_seconds": self.config.timeout_seconds,
+                "max_retries": self.config.max_retries,
+            }
         elif self.config.has_openai_api_key:
             mode = "openai_configured_placeholder"
             content = (
                 "OpenAI API key is present, but live calls are not enabled. "
                 "Returning deterministic placeholder content."
             )
+            metadata = {
+                "request_kind": request_kind,
+                "has_openai_api_key": self.config.has_openai_api_key,
+                "allow_live_calls": self.config.allow_live_calls,
+                "timeout_seconds": self.config.timeout_seconds,
+                "max_retries": self.config.max_retries,
+            }
         else:
             mode = "openai_unconfigured_placeholder"
             content = (
                 "OpenAI provider selected without API credentials. "
                 "Returning deterministic placeholder content and keeping the workflow local."
             )
+            metadata = {
+                "request_kind": request_kind,
+                "has_openai_api_key": self.config.has_openai_api_key,
+                "allow_live_calls": self.config.allow_live_calls,
+                "timeout_seconds": self.config.timeout_seconds,
+                "max_retries": self.config.max_retries,
+            }
 
         latency_seconds = round(perf_counter() - started_clock, 4)
         return AIProviderResponse(
@@ -185,12 +274,7 @@ class OpenAIProvider(BaseAIProvider):
             started_at=started_at,
             finished_at=utc_now(),
             latency_seconds=latency_seconds,
-            metadata={
-                "has_openai_api_key": self.config.has_openai_api_key,
-                "allow_live_calls": self.config.allow_live_calls,
-                "timeout_seconds": self.config.timeout_seconds,
-                "max_retries": self.config.max_retries,
-            },
+            metadata=metadata,
         )
 
 

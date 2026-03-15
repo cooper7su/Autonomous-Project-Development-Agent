@@ -982,9 +982,16 @@ def resolve_goal(
     return goal
 
 
-def save_plan(base_dir: Path | str, goal: ProjectGoal, tasks: list[PlannedTask], *, phase: str) -> dict[str, Any]:
+def save_plan(
+    base_dir: Path | str,
+    goal: ProjectGoal,
+    tasks: list[PlannedTask],
+    *,
+    phase: str,
+    planning_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Persist the generated task plan."""
-    payload = build_plan_payload(goal, tasks, phase=phase)
+    payload = build_plan_payload(goal, tasks, phase=phase, planning_state=planning_state)
     write_json_file(plan_path(base_dir), payload)
     append_json_line(
         execution_log_path(base_dir),
@@ -997,6 +1004,8 @@ def save_plan(base_dir: Path | str, goal: ProjectGoal, tasks: list[PlannedTask],
             "parallel_task_count": payload.get("parallel_task_count", 0),
             "ai_task_count": payload.get("ai_task_count", 0),
             "use_ai": goal.use_ai,
+            "planning_mode": payload.get("planning", {}).get("planning_mode"),
+            "planning_provider": payload.get("planning", {}).get("planning_provider"),
         },
     )
     return payload
@@ -1057,10 +1066,21 @@ def print_goal_summary(goal: ProjectGoal) -> None:
     print(f"- Success criteria: {len(goal.success_criteria)}")
 
 
-def print_task_plan(goal: ProjectGoal, tasks: list[PlannedTask], memory_state: dict[str, Any] | None = None) -> None:
+def print_task_plan(
+    goal: ProjectGoal,
+    tasks: list[PlannedTask],
+    memory_state: dict[str, Any] | None = None,
+    planning_state: dict[str, Any] | None = None,
+) -> None:
     """Print the workflow task plan."""
     print_goal_summary(goal)
+    planning_state = planning_state or {}
     print(f"\n{goal.phase} plan")
+    if planning_state:
+        print(f"- planning_mode: {planning_state.get('planning_mode', 'unknown')}")
+        print(f"- planning_provider: {planning_state.get('planning_provider', 'disabled')}")
+        print(f"- planning_provider_mode: {planning_state.get('planning_provider_mode', 'disabled')}")
+        print(f"- planning_adjustments: {planning_state.get('adjustment_count', 0)}")
     for task in tasks:
         print(
             f"- [{task.order}] {task.task_id} ({task.module_name}, {task.executor_type}, "
@@ -1073,6 +1093,8 @@ def print_task_plan(goal: ProjectGoal, tasks: list[PlannedTask], memory_state: d
             print(f"  depends_on: {', '.join(task.depends_on)}")
         if task.callback_channel:
             print(f"  callback_channel: {task.callback_channel}")
+        if task.metadata.get("ai_planning"):
+            print(f"  ai_planning: {task.metadata.get('ai_planning')}")
         print(f"  description: {task.description}")
         print(f"  expected: {task.expected_output}")
         print(f"  prompt: {render_task_prompt(task, goal, memory_state)}")
@@ -1111,6 +1133,12 @@ def print_workflow_report(report: dict[str, Any]) -> None:
         print(f"- Memory vectors: {memory_state.get('vector_count', 0)}")
         if memory_state.get("retrieved_goal_count") is not None:
             print(f"- Memory matches: {memory_state.get('retrieved_goal_count', 0)}")
+
+    planning = report.get("plan", {}).get("planning") or {}
+    if planning:
+        print(f"- Planning mode: {planning.get('planning_mode', 'unknown')}")
+        print(f"- Planning provider: {planning.get('planning_provider', 'disabled')}")
+        print(f"- Planning adjustments: {planning.get('adjustment_count', 0)}")
 
     statistics = report.get("statistics") or {}
     if statistics:
@@ -1212,6 +1240,8 @@ def print_status_overview(base_dir: Path | str) -> None:
         print(f"- Planned tasks: {current_plan.get('task_count', 0)}")
         print(f"- Parallel tasks: {current_plan.get('parallel_task_count', 0)}")
         print(f"- AI tasks: {current_plan.get('ai_task_count', 0)}")
+        print(f"- Planning mode: {current_plan.get('planning', {}).get('planning_mode', 'unknown')}")
+        print(f"- Planning provider: {current_plan.get('planning', {}).get('planning_provider', 'disabled')}")
     else:
         print("- Planned tasks: not generated")
     if current_loop_state:
@@ -1300,7 +1330,7 @@ def plan_workflow(
     phase: str,
     enable_ai: bool = False,
     ai_provider: str | None = None,
-) -> tuple[ProjectGoal, list[PlannedTask], dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[ProjectGoal, list[PlannedTask], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Resolve a workflow goal, update local memory, and generate a task plan."""
     ensure_runtime_tree(base_dir)
     goal = resolve_goal(
@@ -1348,11 +1378,17 @@ def plan_workflow(
         "task_profile_count": task_history.get("task_profile_count", 0),
         "goal_use_ai": goal.use_ai,
     }
-    tasks = generate_task_plan(goal, phase=phase, task_history=task_history)
+    tasks, planning_state = generate_task_plan(
+        goal,
+        phase=phase,
+        task_history=task_history,
+        memory_status=memory_state,
+        ai_provider=goal.ai_provider if goal.use_ai else None,
+    )
     memory_state["ai_task_count"] = sum(1 for task in tasks if task.use_ai)
-    payload = save_plan(base_dir, goal, tasks, phase=phase)
+    payload = save_plan(base_dir, goal, tasks, phase=phase, planning_state=planning_state)
     persist_ai_execution_state(base_dir, phase=phase, enabled=enable_ai, goal=goal, tasks=tasks)
-    return goal, tasks, payload, memory_state, task_history
+    return goal, tasks, payload, memory_state, task_history, planning_state
 
 
 def run_autonomous_phase(
@@ -1365,7 +1401,7 @@ def run_autonomous_phase(
     ai_provider: str | None = None,
 ) -> int:
     """Execute the Phase2, Phase3, Phase4, or Phase5 autonomous workflow."""
-    goal, tasks, plan_payload, memory_state, task_history_state = plan_workflow(
+    goal, tasks, plan_payload, memory_state, task_history_state, planning_state = plan_workflow(
         base_dir,
         goal_text,
         project_dir,
@@ -1651,6 +1687,14 @@ def render_streamlit_placeholder() -> None:
 
     if current_plan:
         st.write("Plan")
+        st.json(
+            {
+                "task_count": current_plan.get("task_count", 0),
+                "parallel_task_count": current_plan.get("parallel_task_count", 0),
+                "ai_task_count": current_plan.get("ai_task_count", 0),
+                "planning": current_plan.get("planning", {}),
+            }
+        )
         st.table(current_plan.get("tasks", []))
         if current_plan.get("dependency_edges"):
             st.write("Dependency edges")
@@ -1888,7 +1932,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         return run_phase1(args.base_dir, enable_ai=args.enable_ai, ai_provider=args.ai_provider)
 
     if args.plan:
-        goal, tasks, _, memory_state, _ = plan_workflow(
+        goal, tasks, _, memory_state, _, planning_state = plan_workflow(
             args.base_dir,
             args.goal_text,
             args.project_dir,
@@ -1896,7 +1940,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             enable_ai=args.enable_ai,
             ai_provider=args.ai_provider,
         )
-        print_task_plan(goal, tasks, memory_state)
+        print_task_plan(goal, tasks, memory_state, planning_state)
         return 0
 
     if args.run_phase2:

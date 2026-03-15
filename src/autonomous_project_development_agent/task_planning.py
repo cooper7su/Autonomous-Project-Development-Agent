@@ -9,6 +9,8 @@ Phase5 extends the earlier planning layer with:
 Future phases can replace these deterministic templates with adaptive
 replanning, approval-aware routing, and richer project-specific planners.
 AI-Phase1 adds task-level AI flags and prompt-template placeholders.
+AI-Phase3 adds provider-assisted task planning while keeping the final plan
+fully local, deterministic, and auditable.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .ai_provider import AIProviderRequest, resolve_ai_provider
 from .goal_framework import ProjectGoal, render_goal_ai_prompt, utc_now
 
 
@@ -112,7 +115,9 @@ def generate_task_plan(
     goal: ProjectGoal,
     phase: str | None = None,
     task_history: dict[str, Any] | None = None,
-) -> list[PlannedTask]:
+    memory_status: dict[str, Any] | None = None,
+    ai_provider: str | None = None,
+) -> tuple[list[PlannedTask], dict[str, Any]]:
     """Generate a deterministic task plan for the requested workflow phase."""
     resolved_phase = phase or goal.phase
     if resolved_phase == "Phase5":
@@ -124,7 +129,201 @@ def generate_task_plan(
     else:
         tasks = _generate_phase2_task_plan(goal)
     tasks = _apply_historical_task_heuristics(tasks, task_history or {}, phase=resolved_phase)
-    return _apply_ai_task_defaults(tasks)
+    tasks = _apply_ai_task_defaults(tasks)
+    planning_state = _build_rule_based_planning_state(goal, tasks)
+    if goal.use_ai:
+        tasks, planning_state = _apply_ai_assisted_planning(
+            goal,
+            tasks,
+            memory_status=memory_status or {},
+            task_history=task_history or {},
+            ai_provider=ai_provider or goal.ai_provider,
+        )
+    return tasks, planning_state
+
+
+def _build_rule_based_planning_state(goal: ProjectGoal, tasks: list[PlannedTask]) -> dict[str, Any]:
+    """Create the default planning metadata when AI planning is not enabled."""
+
+    return {
+        "planning_mode": "rule_based",
+        "planning_provider": "disabled",
+        "planning_provider_mode": "disabled",
+        "planning_prompt_preview": None,
+        "planning_response_preview": None,
+        "task_count": len(tasks),
+        "parallel_candidate_count": sum(1 for task in tasks if task.execution_mode == "parallel"),
+        "memory_goal_count": 0,
+        "task_profile_count": 0,
+        "adjustment_count": 0,
+        "adjustments": [],
+        "goal_use_ai": goal.use_ai,
+    }
+
+
+def _render_ai_planning_prompt(
+    goal: ProjectGoal,
+    tasks: list[PlannedTask],
+    memory_status: dict[str, Any],
+    task_history: dict[str, Any],
+) -> str:
+    """Render a safe AI planning prompt preview."""
+
+    task_lines = [
+        f"- {task.order}:{task.task_id}:{task.executor_type}:{task.execution_mode}:priority={task.priority}:use_ai={task.use_ai}"
+        for task in tasks
+    ]
+    return "\n".join(
+        [
+            render_goal_ai_prompt(goal),
+            f"memory_goals={memory_status.get('goal_count', 0)}",
+            f"memory_matches={memory_status.get('retrieved_goal_count', 0)}",
+            f"task_profiles={task_history.get('task_profile_count', 0)}",
+            "existing_tasks:",
+            *task_lines,
+            "instruction=improve planning while staying local, safe, and read-only.",
+        ]
+    )
+
+
+def _attach_planning_session(
+    tasks: list[PlannedTask],
+    planning_state: dict[str, Any],
+) -> list[PlannedTask]:
+    """Attach the shared planning session to the first task for persistence."""
+
+    if not tasks:
+        return tasks
+    adapted = list(tasks)
+    anchor = adapted[0]
+    payload = anchor.to_dict()
+    metadata = dict(anchor.metadata)
+    metadata["ai_planning_session"] = planning_state
+    payload["metadata"] = metadata
+    adapted[0] = PlannedTask.from_dict(payload)
+    return adapted
+
+
+def _apply_ai_assisted_planning(
+    goal: ProjectGoal,
+    tasks: list[PlannedTask],
+    *,
+    memory_status: dict[str, Any],
+    task_history: dict[str, Any],
+    ai_provider: str,
+) -> tuple[list[PlannedTask], dict[str, Any]]:
+    """Apply provider-assisted planning hints while keeping the final plan local."""
+
+    planning_prompt = _render_ai_planning_prompt(goal, tasks, memory_status, task_history)
+    provider = resolve_ai_provider(ai_provider)
+    provider_request = AIProviderRequest(
+        provider_name=ai_provider,
+        task_id="task_planning_session",
+        goal_id=goal.goal_id,
+        phase=goal.phase,
+        prompt=planning_prompt,
+        system_prompt=(
+            "Generate safe task-planning guidance only. "
+            "Do not assume network access or direct file mutation."
+        ),
+        target_project_dir=goal.target_project_dir,
+        task_title=f"{goal.phase} AI-assisted task planning",
+        metadata={
+            "request_kind": "task_planning",
+            "existing_task_count": len(tasks),
+            "ai_task_count": sum(1 for task in tasks if task.use_ai),
+            "memory_goal_count": memory_status.get("goal_count", 0),
+            "memory_match_count": memory_status.get("retrieved_goal_count", 0),
+            "task_profile_count": task_history.get("task_profile_count", 0),
+            "complexity_level": goal.complexity_level,
+        },
+    )
+    provider_response = provider.generate(provider_request)
+    adjustment_records: list[dict[str, Any]] = []
+    adapted_tasks: list[PlannedTask] = []
+
+    for task in tasks:
+        payload = task.to_dict()
+        metadata = dict(task.metadata)
+        notes: list[str] = []
+        priority_delta = 0
+        retry_delta = 0
+
+        if task.use_ai:
+            priority_delta += 6
+            retry_delta += 1
+            notes.append("ai_capable_task_priority_boost")
+
+        if goal.phase == "Phase2" and task.task_id in {"generate_module_list", "count_python_files"}:
+            payload["execution_mode"] = "parallel"
+            payload["parallel_group"] = "project_scan"
+            payload["depends_on"] = ["inspect_project_directory"]
+            priority_delta += 4
+            notes.append("phase2_parallelized_scan_group")
+
+        if (
+            goal.phase in {"Phase4", "Phase5"}
+            and memory_status.get("retrieved_goal_count", 0) > 0
+            and task.task_id in {"retrieve_memory_context", "compile_phase5_task_tree", "draft_iteration_review", "draft_self_optimization_review"}
+        ):
+            priority_delta += 4
+            notes.append("memory_context_priority_boost")
+
+        if goal.complexity_level == "complex" and task.task_id in {
+            "compile_phase5_task_tree",
+            "propose_phase4_actions",
+            "propose_phase5_actions",
+        }:
+            priority_delta += 3
+            notes.append("complexity_priority_boost")
+
+        if priority_delta:
+            payload["priority"] = max(10, min(200, int(task.priority) + priority_delta))
+        if retry_delta:
+            payload["max_retries"] = max(1, min(4, int(task.max_retries) + retry_delta))
+
+        if notes:
+            metadata["ai_planning"] = {
+                "provider": provider_response.provider_name,
+                "provider_mode": provider_response.mode,
+                "notes": notes,
+                "priority_delta": priority_delta,
+                "retry_delta": retry_delta,
+            }
+            payload["metadata"] = metadata
+            adjustment_records.append(
+                {
+                    "task_id": task.task_id,
+                    "notes": notes,
+                    "priority_delta": priority_delta,
+                    "retry_delta": retry_delta,
+                    "execution_mode": payload.get("execution_mode", task.execution_mode),
+                    "parallel_group": payload.get("parallel_group", task.parallel_group),
+                }
+            )
+
+        adapted_tasks.append(PlannedTask.from_dict(payload))
+
+    planning_state = {
+        "planning_mode": "ai_assisted",
+        "planning_provider": provider_response.provider_name,
+        "planning_provider_mode": provider_response.mode,
+        "planning_model_name": provider_response.model_name,
+        "planning_prompt_preview": planning_prompt,
+        "planning_response_preview": provider_response.content,
+        "provider_request": provider_request.to_dict(),
+        "provider_response": provider_response.to_dict(),
+        "task_count": len(adapted_tasks),
+        "parallel_candidate_count": sum(1 for task in adapted_tasks if task.execution_mode == "parallel"),
+        "memory_goal_count": memory_status.get("goal_count", 0),
+        "memory_match_count": memory_status.get("retrieved_goal_count", 0),
+        "task_profile_count": task_history.get("task_profile_count", 0),
+        "adjustment_count": len(adjustment_records),
+        "adjustments": adjustment_records,
+        "goal_use_ai": goal.use_ai,
+    }
+    adapted_tasks = _attach_planning_session(adapted_tasks, planning_state)
+    return adapted_tasks, planning_state
 
 
 def _apply_ai_task_defaults(tasks: list[PlannedTask]) -> list[PlannedTask]:
@@ -823,11 +1022,17 @@ def _apply_historical_task_heuristics(
     return adapted_tasks
 
 
-def build_plan_payload(goal: ProjectGoal, tasks: list[PlannedTask], phase: str | None = None) -> dict[str, Any]:
+def build_plan_payload(
+    goal: ProjectGoal,
+    tasks: list[PlannedTask],
+    phase: str | None = None,
+    planning_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Serialize the current plan for persistence and CLI display."""
     resolved_phase = phase or goal.phase
     parallel_task_count = sum(1 for task in tasks if task.execution_mode == "parallel")
     ai_task_count = sum(1 for task in tasks if task.use_ai)
+    planning_state = planning_state or _build_rule_based_planning_state(goal, tasks)
 
     executor_breakdown: dict[str, int] = {}
     ai_executor_breakdown: dict[str, int] = {}
@@ -873,6 +1078,7 @@ def build_plan_payload(goal: ProjectGoal, tasks: list[PlannedTask], phase: str |
         "parallel_groups": parallel_groups,
         "dependency_edges": dependency_edges,
         "heuristic_adjustments": heuristic_adjustments,
+        "planning": planning_state,
         "tasks": [task.to_dict() for task in tasks],
     }
 

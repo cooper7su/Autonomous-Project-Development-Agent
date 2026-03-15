@@ -8,7 +8,9 @@ separate from task execution. The current implementation stays local and safe:
   live network calls unless a later phase explicitly enables that behavior.
 
 Future phases can extend these classes with approval-aware live requests,
-response parsing, caching, and richer error handling.
+response parsing, caching, and richer error handling. AI-Phase4 extends the
+same interface with preview-only candidate code and patch-summary responses so
+the workflow can create engineering artifacts without mutating the repository.
 """
 
 from __future__ import annotations
@@ -107,6 +109,110 @@ class BaseAIProvider:
         raise NotImplementedError
 
 
+def _candidate_symbol_name(task_id: str, target_file: str) -> str:
+    """Derive a stable Python symbol name for preview-only candidate code."""
+
+    stem = target_file.rsplit("/", 1)[-1].split(".", 1)[0] if target_file else task_id
+    tokens = [token for token in stem.replace("-", "_").split("_") if token]
+    if not tokens:
+        tokens = [token for token in task_id.replace("-", "_").split("_") if token]
+    return "".join(token[:1].upper() + token[1:] for token in tokens) or "CandidatePreview"
+
+
+def _build_candidate_preview_payload(
+    request: AIProviderRequest,
+    *,
+    provider_label: str,
+    guidance_note: str,
+) -> tuple[str, dict[str, Any]]:
+    """Build a deterministic preview-only candidate payload."""
+
+    target_file = str(
+        request.metadata.get("candidate_target_file")
+        or "src/autonomous_project_development_agent/preview_candidate.py"
+    )
+    change_type = str(request.metadata.get("candidate_change_type", "add_preview_module"))
+    preview_only = bool(request.metadata.get("preview_only", True))
+    not_applied = bool(request.metadata.get("not_applied", True))
+    requires_review = bool(request.metadata.get("requires_review", True))
+    risk_level = str(request.metadata.get("risk_level", "low"))
+    symbol_name = _candidate_symbol_name(request.task_id, target_file)
+
+    candidate_code = "\n".join(
+        [
+            f'"""Preview-only candidate generated for {request.task_id}.',
+            "",
+            "This file is not applied automatically by the workflow.",
+            '"""',
+            "",
+            f"class {symbol_name}:",
+            '    """Preview helper proposed by the AI-Phase4 code-assist pipeline."""',
+            "",
+            "    def summarize(self) -> dict[str, object]:",
+            "        return {",
+            f'            "goal_id": "{request.goal_id}",',
+            f'            "phase": "{request.phase}",',
+            f'            "task_id": "{request.task_id}",',
+            f'            "target_file": "{target_file}",',
+            f'            "provider": "{provider_label}",',
+            f'            "preview_only": {preview_only},',
+            "        }",
+            "",
+            "",
+            "def build_candidate_preview() -> dict[str, object]:",
+            f"    return {symbol_name}().summarize()",
+        ]
+    )
+
+    patch_summary = [
+        {
+            "target_file": target_file,
+            "change_type": change_type,
+            "summary": (
+                "Add a preview-only helper module that packages scan metrics, memory context, "
+                "and safe next-step recommendations behind one reusable Python object."
+            ),
+            "preview_only": preview_only,
+            "not_applied": not_applied,
+            "requires_review": requires_review,
+            "risk_level": risk_level,
+        }
+    ]
+    rationale = (
+        "The candidate stays read-only and artifact-only so developers can review a concrete "
+        "implementation direction before any repository mutation is considered."
+    )
+    labels = ["preview_only", "not_applied", "requires_review", "ai_phase4"]
+
+    content = "\n".join(
+        [
+            f"{provider_label} code-assist response.",
+            f"Phase: {request.phase}",
+            f"Task: {request.task_id}",
+            f"Target file: {target_file}",
+            f"Guidance: {guidance_note}",
+            "Preview labels: preview_only, not_applied, requires_review",
+        ]
+    )
+    metadata = {
+        "request_kind": str(request.metadata.get("request_kind", "code_assist")),
+        "candidate_code": candidate_code,
+        "candidate_patch_summary": patch_summary,
+        "target_file": target_file,
+        "rationale": rationale,
+        "risk_level": risk_level,
+        "preview_only": preview_only,
+        "not_applied": not_applied,
+        "requires_review": requires_review,
+        "labels": labels,
+        "candidate_change_type": change_type,
+        "guidance_note": guidance_note,
+        "request_prompt_length": len(request.prompt),
+        "system_prompt_length": len(request.system_prompt),
+    }
+    return content, metadata
+
+
 class LocalTemplateProvider(BaseAIProvider):
     """Return deterministic local template output for AI-enabled tasks."""
 
@@ -143,6 +249,13 @@ class LocalTemplateProvider(BaseAIProvider):
                 "request_prompt_length": len(request.prompt),
                 "system_prompt_length": len(request.system_prompt),
             }
+        elif request_kind in {"code_assist", "patch_preview"}:
+            content, metadata = _build_candidate_preview_payload(
+                request,
+                provider_label="Local template provider",
+                guidance_note="Keep all candidate code as preview artifacts until explicit approval exists.",
+            )
+            metadata["allow_live_calls"] = self.config.allow_live_calls
         else:
             content = (
                 "Local template provider response.\n"
@@ -164,7 +277,13 @@ class LocalTemplateProvider(BaseAIProvider):
             provider_name=self.provider_name,
             model_name="local-template-v1",
             success=True,
-            mode="local_template_planning" if request_kind == "task_planning" else "local_template",
+            mode=(
+                "local_template_planning"
+                if request_kind == "task_planning"
+                else "local_template_code_assist"
+                if request_kind in {"code_assist", "patch_preview"}
+                else "local_template"
+            ),
             content=content,
             started_at=started_at,
             finished_at=utc_now(),
@@ -224,6 +343,29 @@ class OpenAIProvider(BaseAIProvider):
                 "timeout_seconds": self.config.timeout_seconds,
                 "max_retries": self.config.max_retries,
             }
+        elif request_kind in {"code_assist", "patch_preview"}:
+            if live_call_ready:
+                mode = "openai_code_assist_live_disabled_by_phase"
+                guidance_note = "OpenAI is configured, but AI-Phase4 keeps code-assist in preview-only placeholder mode."
+            elif self.config.has_openai_api_key:
+                mode = "openai_code_assist_configured_placeholder"
+                guidance_note = "OpenAI credentials are present, but live candidate generation remains disabled."
+            else:
+                mode = "openai_code_assist_unconfigured_placeholder"
+                guidance_note = "OpenAI was selected without credentials, so deterministic local preview content is returned."
+            content, metadata = _build_candidate_preview_payload(
+                request,
+                provider_label="OpenAI placeholder provider",
+                guidance_note=guidance_note,
+            )
+            metadata.update(
+                {
+                    "has_openai_api_key": self.config.has_openai_api_key,
+                    "allow_live_calls": self.config.allow_live_calls,
+                    "timeout_seconds": self.config.timeout_seconds,
+                    "max_retries": self.config.max_retries,
+                }
+            )
         elif live_call_ready:
             mode = "openai_live_disabled_by_phase"
             content = (

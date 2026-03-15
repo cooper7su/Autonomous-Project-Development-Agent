@@ -271,7 +271,8 @@ def build_project_goal(
     if phase == "Phase5":
         constraints.append("All optimization logic must be local, deterministic, and safe to rerun.")
     if enable_ai:
-        constraints.append("AI mode uses only local placeholder execution in AI-Phase1.")
+        constraints.append("AI mode uses only local placeholder execution in AI-Phase1 through AI-Phase4.")
+        constraints.append("AI-Phase4 candidate code stays preview-only and must not be applied automatically.")
 
     notes = [
         f"This goal is configured for the {phase} prototype workflow.",
@@ -282,6 +283,7 @@ def build_project_goal(
     if enable_ai:
         notes.append("AI-Phase1 is enabled: AIExecutor routes AI-capable tasks through safe local placeholders.")
         notes.append("AI-Phase2 provider abstraction is active: provider routing is configurable without changing task structures.")
+        notes.append("AI-Phase4 keeps code assistance in preview-only mode with local verification and explicit review gating.")
     notes.extend(lineage["retrieval_notes"])
 
     tags = ["python", "local-analysis", phase.lower(), complexity_level]
@@ -335,7 +337,7 @@ def render_goal_ai_prompt(goal: ProjectGoal) -> str:
         f"priority={goal.priority}; "
         f"goal_version={goal.goal_version}; "
         f"use_ai={goal.use_ai}; "
-        "instruction=produce a safe read-only planning or code suggestion."
+        "instruction=produce a safe read-only planning, candidate code, or patch-preview suggestion."
     )
 
 

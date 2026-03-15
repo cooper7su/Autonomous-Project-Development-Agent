@@ -23,6 +23,19 @@ a full AI-assisted agent loop:
 - Record prompts, outputs, status, and decisions in structured runtime state.
 - Add AI features incrementally without breaking existing Phase1-Phase5 flows.
 
+## Current Status
+
+- AI-Phase1 is implemented: AI execution flags, `AIExecutor`, and `--enable-ai`
+  are live in the codebase.
+- AI-Phase2 is implemented: provider abstraction, provider status reporting, and
+  `--ai-provider` routing are live without enabling network calls.
+- AI-Phase3 is implemented: provider-assisted task planning, planning rationale,
+  and AI-aware plan persistence are live.
+- AI-Phase4 is implemented in preview-only mode: candidate code generation,
+  candidate patch summaries, local verification, `--run-ai-phase4`,
+  `--preview-patch`, and `--review-candidates` are live without automatic patch
+  application.
+
 ## AI-Phase1: AI Integration Skeleton
 
 ### Goal
@@ -116,26 +129,30 @@ retaining deterministic local planning as a fallback.
 ### Goal
 
 Use AI to propose code, edits, or patches while keeping verification local and
-safe.
+safe. The current implementation keeps all code-assist output preview-only and
+requires review before any future apply path is considered.
 
 ### Scope
 
 - Add AI task types for code generation and code modification.
 - Produce candidate patches or file drafts instead of uncontrolled direct edits.
-- Run local syntax checks, tests, and verification after generation.
+- Persist candidate code, patch summaries, verification output, and review state
+  under the runtime artifacts/state tree.
+- Run local syntax checks, path-safety checks, and smoke-test verification after generation.
 - Keep human review points for higher-risk changes.
 
 ### Deliverables
 
-- Patch proposal workflow
+- Preview-only patch proposal workflow
 - Local validation after AI generation
-- Structured review artifacts and change summaries
+- Structured review artifacts, candidate previews, and verification summaries
 
 ### Acceptance Criteria
 
 - The system can generate a candidate code change safely.
 - Validation runs automatically after generation.
 - Failing outputs are rejected or flagged for intervention.
+- No candidate patch is automatically applied to repository files.
 
 ## AI-Phase5: Memory and Self-Optimization
 

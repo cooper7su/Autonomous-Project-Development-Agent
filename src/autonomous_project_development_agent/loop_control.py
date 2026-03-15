@@ -55,6 +55,9 @@ class LoopState:
             "parallel_batches": 0,
             "total_retries": 0,
             "adaptive_priority_tasks": 0,
+            "preview_completed_tasks": 0,
+            "review_required_events": 0,
+            "verification_failed_tasks": 0,
         }
     )
     updated_at: str = field(default_factory=utc_now)
@@ -96,6 +99,9 @@ class LoopState:
                         "parallel_batches": 0,
                         "total_retries": 0,
                         "adaptive_priority_tasks": 0,
+                        "preview_completed_tasks": 0,
+                        "review_required_events": 0,
+                        "verification_failed_tasks": 0,
                     },
                 )
             ),
@@ -220,10 +226,16 @@ def apply_batch_to_loop(
                 "task_id": task.task_id,
                 "analysis_status": analysis.status,
                 "recommended_action": analysis.recommended_action,
+                "review_required": analysis.review_required,
+                "preview_status": analysis.preview_status,
                 "parallel_group": task.parallel_group,
                 "timestamp": loop_state.updated_at,
             }
         )
+        if analysis.review_required:
+            loop_state.statistics["review_required_events"] = loop_state.statistics.get("review_required_events", 0) + 1
+        if analysis.preview_status == "preview_complete":
+            loop_state.statistics["preview_completed_tasks"] = loop_state.statistics.get("preview_completed_tasks", 0) + 1
 
         if analysis.status == "passed":
             if task.task_id not in loop_state.completed_task_ids:
@@ -254,6 +266,8 @@ def apply_batch_to_loop(
         if task.task_id not in loop_state.failed_task_ids:
             loop_state.failed_task_ids.append(task.task_id)
             loop_state.statistics["failed_tasks"] = loop_state.statistics.get("failed_tasks", 0) + 1
+        if analysis.preview_status == "verification_failed":
+            loop_state.statistics["verification_failed_tasks"] = loop_state.statistics.get("verification_failed_tasks", 0) + 1
         loop_state.human_intervention_required = True
 
     loop_state.running_task_ids = []
@@ -272,7 +286,10 @@ def apply_batch_to_loop(
     if hard_failure_task_ids:
         loop_state.overall_status = "needs_human_intervention"
         loop_state.next_action = "human_intervention"
-        loop_state.stop_reason = f"task_failure:{','.join(hard_failure_task_ids)}"
+        if any(analysis.recommended_action == "review_candidate" for analysis in analyses):
+            loop_state.stop_reason = f"review_required:{','.join(hard_failure_task_ids)}"
+        else:
+            loop_state.stop_reason = f"task_failure:{','.join(hard_failure_task_ids)}"
         return loop_state
 
     if retryable_task_ids:

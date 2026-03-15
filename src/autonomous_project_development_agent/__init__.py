@@ -21,7 +21,7 @@ DEFAULT_PHASE5_GOAL = (
     "task tree, execute safe local analysis tasks, and produce a local autonomy "
     "review without external AI APIs."
 )
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 PHASE1_MODULE_MAP = [
     (
@@ -54,6 +54,8 @@ PLACEHOLDER_LOGS = [
     "Loop control placeholder loaded: no autonomous retry policy is active yet.",
     "AI-Phase1 adds a safe AIExecutor boundary that can be enabled with --enable-ai.",
     "AI-Phase2 adds provider abstraction so AI placeholder routing is decoupled from provider selection.",
+    "AI-Phase3 adds provider-assisted planning metadata while keeping planning deterministic and auditable.",
+    "AI-Phase4 adds preview-only candidate code, patch summaries, and local verification before review.",
 ]
 
 PHASE1_TASK_BLUEPRINTS = [

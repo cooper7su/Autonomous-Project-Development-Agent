@@ -72,6 +72,7 @@ if __package__ in {None, ""}:
         PlannedTask,
         build_plan_payload,
         generate_task_plan,
+        is_ai_code_assist_task,
         render_task_prompt,
     )
 else:
@@ -111,7 +112,7 @@ else:
         update_task_history,
         update_workflow_history,
     )
-    from .task_planning import PlannedTask, build_plan_payload, generate_task_plan, render_task_prompt
+    from .task_planning import PlannedTask, build_plan_payload, generate_task_plan, is_ai_code_assist_task, render_task_prompt
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execute the Phase4 autonomous workflow with memory, task trees, and review packaging.",
     )
     actions.add_argument(
+        "--run-ai-phase4",
+        action="store_true",
+        help="Execute the AI-Phase4 preview-only candidate workflow with AI routing enabled.",
+    )
+    actions.add_argument(
         "--run-phase5",
         action="store_true",
         help="Execute the Phase5 autonomous workflow with local memory, heuristic planning, and self-optimization.",
@@ -215,6 +221,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--visualize",
         action="store_true",
         help="Launch the Streamlit dashboard for goals, tasks, logs, and reports.",
+    )
+    actions.add_argument(
+        "--preview-patch",
+        action="store_true",
+        help="Show the latest preview-only candidate patch summaries and candidate code artifacts.",
+    )
+    actions.add_argument(
+        "--review-candidates",
+        action="store_true",
+        help="Show the latest candidate items that require manual review before any future apply step.",
     )
     parser.add_argument(
         "--goal",
@@ -403,7 +419,28 @@ def load_ai_execution_state(base_dir: Path | str) -> dict[str, Any]:
         "goal_use_ai": False,
         "ai_task_count": 0,
         "actual_ai_executor_runs": 0,
+        "candidate_preview_count": 0,
+        "preview_completed_count": 0,
+        "review_required_count": 0,
+        "verification_failed_count": 0,
+        "candidate_targets": [],
         "available_routes": [],
+    }
+
+
+def _candidate_summary_from_report(final_report: dict[str, Any] | None) -> dict[str, Any]:
+    """Extract compact candidate-preview state from the latest final report."""
+
+    final_report = final_report or {}
+    summary = dict(final_report.get("summary", {}))
+    candidate_previews = list(final_report.get("candidate_previews", []))
+    return {
+        "candidate_preview_count": int(summary.get("candidate_preview_count", len(candidate_previews))),
+        "preview_completed_count": int(summary.get("preview_completed_count", 0)),
+        "review_required_count": int(summary.get("review_required_count", 0)),
+        "verification_failed_count": int(summary.get("verification_failed_count", 0)),
+        "candidate_targets": [entry.get("target_file") for entry in candidate_previews if entry.get("target_file")],
+        "review_required_items": [entry for entry in candidate_previews if entry.get("review_required")],
     }
 
 
@@ -416,6 +453,7 @@ def persist_ai_execution_state(
     tasks: list[PlannedTask] | None = None,
     ai_provider: str | None = None,
     actual_ai_executor_runs: int = 0,
+    final_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist a structured AI execution state snapshot for CLI and Streamlit."""
 
@@ -427,6 +465,7 @@ def persist_ai_execution_state(
         provider_status["provider_name"] = "disabled"
         provider_status["allow_live_calls"] = False
 
+    candidate_summary = _candidate_summary_from_report(final_report)
     payload = {
         "updated_at": utc_now(),
         "phase": phase,
@@ -436,8 +475,15 @@ def persist_ai_execution_state(
         "goal_use_ai": bool(goal.use_ai) if goal else enabled,
         "goal_prompt_preview": render_goal_ai_prompt(goal) if goal else None,
         "ai_task_count": sum(1 for task in tasks if task.use_ai),
+        "candidate_task_count": sum(1 for task in tasks if is_ai_code_assist_task(task)),
         "planned_ai_routes": sorted({task.executor_type for task in tasks if task.use_ai}),
         "actual_ai_executor_runs": actual_ai_executor_runs,
+        "candidate_preview_count": candidate_summary["candidate_preview_count"],
+        "preview_completed_count": candidate_summary["preview_completed_count"],
+        "review_required_count": candidate_summary["review_required_count"],
+        "verification_failed_count": candidate_summary["verification_failed_count"],
+        "candidate_targets": candidate_summary["candidate_targets"],
+        "review_required_items": candidate_summary["review_required_items"][:10],
         "available_routes": [
             "AIExecutor",
             "LocalPythonExecutor",
@@ -1003,6 +1049,7 @@ def save_plan(
             "task_count": len(tasks),
             "parallel_task_count": payload.get("parallel_task_count", 0),
             "ai_task_count": payload.get("ai_task_count", 0),
+            "candidate_task_count": payload.get("candidate_task_count", 0),
             "use_ai": goal.use_ai,
             "planning_mode": payload.get("planning", {}).get("planning_mode"),
             "planning_provider": payload.get("planning", {}).get("planning_provider"),
@@ -1095,6 +1142,10 @@ def print_task_plan(
             print(f"  callback_channel: {task.callback_channel}")
         if task.metadata.get("ai_planning"):
             print(f"  ai_planning: {task.metadata.get('ai_planning')}")
+        if is_ai_code_assist_task(task):
+            print(f"  preview_only: {task.metadata.get('preview_only', True)}")
+            print(f"  requires_review: {task.metadata.get('requires_review', True)}")
+            print(f"  target_file: {task.metadata.get('candidate_target_file', 'unknown')}")
         print(f"  description: {task.description}")
         print(f"  expected: {task.expected_output}")
         print(f"  prompt: {render_task_prompt(task, goal, memory_state)}")
@@ -1123,6 +1174,10 @@ def print_workflow_report(report: dict[str, Any]) -> None:
     print(f"- AI enabled: {summary.get('goal_use_ai', False)}")
     print(f"- AI-capable tasks: {summary.get('ai_task_count', 0)}")
     print(f"- AIExecutor runs: {summary.get('ai_executed_task_count', 0)}")
+    print(f"- Candidate previews: {summary.get('candidate_preview_count', 0)}")
+    print(f"- Preview-complete tasks: {summary.get('preview_completed_count', 0)}")
+    print(f"- Review-required items: {summary.get('review_required_count', 0)}")
+    print(f"- Verification failures: {summary.get('verification_failed_count', 0)}")
     print(f"- Human intervention required: {summary.get('human_intervention_required', False)}")
     print(f"- Total duration (s): {summary.get('total_duration_seconds', 0.0)}")
     print(f"- Average confidence: {summary.get('average_confidence_score', 0.0)}")
@@ -1160,9 +1215,21 @@ def print_workflow_report(report: dict[str, Any]) -> None:
         )
         print(f"  summary: {analysis.get('summary', 'No summary available.')}")
         print(f"  duration_seconds: {result.get('duration_seconds', 0.0)}")
+        if analysis.get("preview_status"):
+            print(f"  preview_status: {analysis.get('preview_status')}")
+        if analysis.get("review_required") is not None:
+            print(f"  review_required: {analysis.get('review_required', False)}")
+        if result.get("output", {}).get("target_file"):
+            print(f"  target_file: {result.get('output', {}).get('target_file')}")
         print(f"  output: {shorten(result.get('output_text', 'No output available.'))}")
         if result.get("artifact_path"):
             print(f"  artifact: {result['artifact_path']}")
+        candidate_preview_artifact = result.get("output", {}).get("candidate_preview_artifact")
+        if candidate_preview_artifact:
+            print(f"  candidate_preview_artifact: {candidate_preview_artifact}")
+        candidate_verification_artifact = result.get("output", {}).get("candidate_verification_artifact")
+        if candidate_verification_artifact:
+            print(f"  candidate_verification_artifact: {candidate_verification_artifact}")
 
 
 def print_memory_status(memory_status: dict[str, Any]) -> None:
@@ -1226,7 +1293,7 @@ def print_status_overview(base_dir: Path | str) -> None:
     else:
         print("- Overall status: no Phase1 run recorded")
 
-    print("\nWorkflow status (latest Phase2/Phase5 run):")
+    print("\nWorkflow status (latest autonomous run):")
     if current_goal:
         print(f"- Goal phase: {current_goal.get('phase', 'unknown')}")
         print(f"- Goal version: {current_goal.get('goal_version', 1)}")
@@ -1240,6 +1307,8 @@ def print_status_overview(base_dir: Path | str) -> None:
         print(f"- Planned tasks: {current_plan.get('task_count', 0)}")
         print(f"- Parallel tasks: {current_plan.get('parallel_task_count', 0)}")
         print(f"- AI tasks: {current_plan.get('ai_task_count', 0)}")
+        print(f"- Candidate tasks: {current_plan.get('candidate_task_count', 0)}")
+        print(f"- Preview-only tasks: {current_plan.get('preview_only_task_count', 0)}")
         print(f"- Planning mode: {current_plan.get('planning', {}).get('planning_mode', 'unknown')}")
         print(f"- Planning provider: {current_plan.get('planning', {}).get('planning_provider', 'disabled')}")
     else:
@@ -1269,6 +1338,11 @@ def print_status_overview(base_dir: Path | str) -> None:
     print(f"- Goal use_ai: {current_ai_state.get('goal_use_ai', False)}")
     print(f"- AI tasks in latest plan: {current_ai_state.get('ai_task_count', 0)}")
     print(f"- AIExecutor runs in latest workflow: {current_ai_state.get('actual_ai_executor_runs', 0)}")
+    print(f"- Candidate previews in latest workflow: {current_ai_state.get('candidate_preview_count', 0)}")
+    print(f"- Preview-complete tasks: {current_ai_state.get('preview_completed_count', 0)}")
+    print(f"- Review-required items: {current_ai_state.get('review_required_count', 0)}")
+    print(f"- Verification failures: {current_ai_state.get('verification_failed_count', 0)}")
+    print(f"- Candidate targets: {current_ai_state.get('candidate_targets', [])}")
     print(f"- Provider status: {current_ai_state.get('provider_status', {})}")
 
 
@@ -1527,6 +1601,7 @@ def run_autonomous_phase(
             1 for record in final_report.get("tasks", [])
             if record.get("result", {}).get("executor_type") == "ai_executor"
         ),
+        final_report=final_report,
     )
     append_json_line(
         execution_log_path(base_dir),
@@ -1538,6 +1613,8 @@ def run_autonomous_phase(
             "task_count": final_report["summary"]["task_count"],
             "ai_enabled": enable_ai,
             "ai_executor_runs": final_report["summary"].get("ai_executed_task_count", 0),
+            "candidate_preview_count": final_report["summary"].get("candidate_preview_count", 0),
+            "review_required_count": final_report["summary"].get("review_required_count", 0),
             "human_intervention_required": final_report["summary"]["human_intervention_required"],
         },
     )
@@ -1552,9 +1629,95 @@ def show_latest_report(base_dir: Path | str) -> int:
     """Load and print the latest persisted workflow final report."""
     report = read_json_file(final_report_path(base_dir))
     if not report:
-        print("Workflow final report not found. Run `--run-phase2`, `--run-phase3`, `--run-phase4`, or `--run-phase5` first.")
+        print(
+            "Workflow final report not found. Run `--run-phase2`, `--run-phase3`, "
+            "`--run-phase4`, `--run-ai-phase4`, or `--run-phase5` first."
+        )
         return 1
     print_workflow_report(report)
+    return 0
+
+
+def show_candidate_previews(base_dir: Path | str) -> int:
+    """Show the latest preview-only candidate patch summaries."""
+
+    report = read_json_file(final_report_path(base_dir))
+    if not report:
+        print("Workflow final report not found. Run `--run-ai-phase4` or an AI-enabled workflow first.")
+        return 1
+
+    candidates = list(report.get("candidate_previews", []))
+    if not candidates:
+        print("No candidate previews are available in the latest report.")
+        return 1
+
+    print("Latest candidate patch previews")
+    print(f"- Goal ID: {report.get('goal', {}).get('goal_id')}")
+    print(f"- Phase: {report.get('phase')}")
+    print(f"- Candidate count: {len(candidates)}")
+    task_records = {
+        record.get("task", {}).get("task_id"): record
+        for record in report.get("tasks", [])
+    }
+    for entry in candidates:
+        record = task_records.get(entry.get("task_id"), {})
+        candidate_output = record.get("result", {}).get("output", {})
+        print(f"\n- Task: {entry.get('task_id')}")
+        print(f"  target_file: {entry.get('target_file')}")
+        print(f"  preview_status: {entry.get('preview_status')}")
+        print(f"  review_required: {entry.get('review_required')}")
+        print(f"  verification_passed: {entry.get('verification_passed')}")
+        print(f"  risk_level: {entry.get('risk_level')}")
+        print(f"  labels: preview_only=True, not_applied=True, requires_review={entry.get('review_required')}")
+        patch_summary = candidate_output.get("candidate_patch_summary", [])
+        if patch_summary:
+            print(f"  patch_summary: {patch_summary}")
+        if entry.get("candidate_preview_artifact"):
+            print(f"  candidate_preview_artifact: {entry.get('candidate_preview_artifact')}")
+        if entry.get("candidate_code_artifact"):
+            print(f"  candidate_code_artifact: {entry.get('candidate_code_artifact')}")
+        if entry.get("candidate_verification_artifact"):
+            print(f"  candidate_verification_artifact: {entry.get('candidate_verification_artifact')}")
+
+    return 0
+
+
+def show_candidate_review_queue(base_dir: Path | str) -> int:
+    """Show the latest candidate items that require manual review."""
+
+    report = read_json_file(final_report_path(base_dir))
+    if not report:
+        print("Workflow final report not found. Run `--run-ai-phase4` or an AI-enabled workflow first.")
+        return 1
+
+    review_items = list(report.get("visualization", {}).get("review_required_items", []))
+    print("Candidate review queue")
+    print(f"- Goal ID: {report.get('goal', {}).get('goal_id')}")
+    print(f"- Review-required items: {len(review_items)}")
+    if not review_items:
+        print("- none")
+        return 0
+
+    task_records = {
+        record.get("task", {}).get("task_id"): record
+        for record in report.get("tasks", [])
+    }
+    for entry in review_items:
+        task_id = entry.get("task_id")
+        record = task_records.get(task_id, {})
+        verification = record.get("result", {}).get("output", {}).get("candidate_verification", {})
+        print(f"\n- Task: {task_id}")
+        print(f"  target_file: {entry.get('target_file')}")
+        print(f"  preview_status: {entry.get('preview_status')}")
+        print(f"  risk_level: {entry.get('risk_level')}")
+        print(f"  verification_passed: {entry.get('verification_passed')}")
+        print(f"  path_safety_check: {verification.get('path_safety_check')}")
+        print(f"  syntax_validation: {verification.get('syntax_validation')}")
+        print(f"  apply_allowed: {verification.get('apply_allowed')}")
+        if entry.get("candidate_preview_artifact"):
+            print(f"  candidate_preview_artifact: {entry.get('candidate_preview_artifact')}")
+        if entry.get("candidate_verification_artifact"):
+            print(f"  candidate_verification_artifact: {entry.get('candidate_verification_artifact')}")
     return 0
 
 
@@ -1627,7 +1790,7 @@ def render_streamlit_placeholder() -> None:
     base_dir = streamlit_base_dir()
     st.set_page_config(page_title=APP_NAME, layout="wide")
     st.title(APP_NAME)
-    st.caption("Phase1 + Phase2 + Phase3 + Phase4 + Phase5 prototype dashboard")
+    st.caption("Phase1 + Phase2 + Phase3 + Phase4 + Phase5 + AI-Phase4 prototype dashboard")
     st.info(
         "This UI visualizes the current local runtime state only. "
         "Interactive controls are limited to browsing historical runtime data and reports."
@@ -1692,6 +1855,8 @@ def render_streamlit_placeholder() -> None:
                 "task_count": current_plan.get("task_count", 0),
                 "parallel_task_count": current_plan.get("parallel_task_count", 0),
                 "ai_task_count": current_plan.get("ai_task_count", 0),
+                "candidate_task_count": current_plan.get("candidate_task_count", 0),
+                "preview_only_task_count": current_plan.get("preview_only_task_count", 0),
                 "planning": current_plan.get("planning", {}),
             }
         )
@@ -1756,6 +1921,41 @@ def render_streamlit_placeholder() -> None:
                         for row in retry_series
                     }
                 )
+            candidate_summary = current_report.get("visualization", {}).get("candidate_summary", {})
+            if candidate_summary:
+                st.write("Candidate preview summary")
+                st.json(candidate_summary)
+            candidate_previews = current_report.get("visualization", {}).get("candidate_previews", [])
+            if candidate_previews:
+                st.write("Candidate previews")
+                st.table(candidate_previews)
+                preview_labels = [
+                    f"{entry.get('task_id')} | {entry.get('preview_status')} | {entry.get('target_file')}"
+                    for entry in candidate_previews
+                ]
+                selected_preview = st.selectbox("View candidate preview", preview_labels, key="candidate-preview")
+                selected_preview_index = preview_labels.index(selected_preview)
+                selected_preview_entry = candidate_previews[selected_preview_index]
+                st.json(selected_preview_entry)
+                selected_task_record = next(
+                    (
+                        record
+                        for record in task_records
+                        if record.get("task", {}).get("task_id") == selected_preview_entry.get("task_id")
+                    ),
+                    {},
+                )
+                candidate_output = selected_task_record.get("result", {}).get("output", {})
+                if candidate_output.get("candidate_code"):
+                    st.code(candidate_output.get("candidate_code", ""), language="python")
+                if candidate_output.get("candidate_patch_summary"):
+                    st.json(candidate_output.get("candidate_patch_summary"))
+                if candidate_output.get("candidate_verification"):
+                    st.json(candidate_output.get("candidate_verification"))
+            review_required_items = current_report.get("visualization", {}).get("review_required_items", [])
+            if review_required_items:
+                st.write("Review-required items")
+                st.table(review_required_items)
     else:
         st.warning("No final report is available yet.")
 
@@ -1782,6 +1982,9 @@ def render_streamlit_placeholder() -> None:
     if current_report and current_report.get("visualization", {}).get("ai_summary"):
         st.write("AI summary")
         st.json(current_report.get("visualization", {}).get("ai_summary"))
+    if current_ai_state.get("candidate_targets"):
+        st.write("Candidate targets")
+        st.table([{"target_file": target} for target in current_ai_state.get("candidate_targets", [])])
 
     st.subheader("Task History")
     task_profiles = list(current_task_history.get("task_profiles", {}).values())
@@ -1853,7 +2056,10 @@ def render_streamlit_placeholder() -> None:
                 "- `python -m autonomous_project_development_agent --goal \"Read a local project directory, generate a module list, count Python files, and output a preliminary analysis report.\" --run-phase2 --enable-ai`",
                 "- `python -m autonomous_project_development_agent --goal \"Inspect a local project, build a reusable module inventory, compute Python file metrics, and generate a safe autonomous implementation suggestion.\" --run-phase3`",
                 "- `python -m autonomous_project_development_agent --goal \"Inspect a local project, recover relevant historical context, generate a dependency-aware task tree, prepare safe autonomous implementation suggestions, and produce an iteration review package.\" --run-phase4`",
+                "- `python -m autonomous_project_development_agent --goal \"Inspect a local project, recover relevant historical context, generate a dependency-aware task tree, prepare safe autonomous implementation suggestions, and produce an iteration review package.\" --run-ai-phase4 --ai-provider local_placeholder`",
                 "- `python -m autonomous_project_development_agent --goal \"Inspect a local project, reuse historical memory, generate a self-optimizing task tree, execute safe local analysis tasks, and produce a local autonomy review without external AI APIs.\" --run-phase5`",
+                "- `python -m autonomous_project_development_agent --preview-patch`",
+                "- `python -m autonomous_project_development_agent --review-candidates`",
                 "- `python -m autonomous_project_development_agent --memory-status`",
                 "- `python -m autonomous_project_development_agent --memory-query --goal \"phase5\"`",
                 "- `python -m autonomous_project_development_agent --visualize`",
@@ -1973,6 +2179,16 @@ def cli_main(argv: list[str] | None = None) -> int:
             ai_provider=args.ai_provider,
         )
 
+    if args.run_ai_phase4:
+        return run_autonomous_phase(
+            args.base_dir,
+            args.goal_text,
+            args.project_dir,
+            phase="Phase4",
+            enable_ai=True,
+            ai_provider=args.ai_provider or "local_placeholder",
+        )
+
     if args.run_phase5:
         return run_autonomous_phase(
             args.base_dir,
@@ -1994,6 +2210,12 @@ def cli_main(argv: list[str] | None = None) -> int:
 
     if args.visualize:
         return launch_visualization(args.base_dir)
+
+    if args.preview_patch:
+        return show_candidate_previews(args.base_dir)
+
+    if args.review_candidates:
+        return show_candidate_review_queue(args.base_dir)
 
     if args.goal_text:
         if args.goal_text == DEFAULT_PHASE4_GOAL:
@@ -2021,7 +2243,10 @@ def cli_main(argv: list[str] | None = None) -> int:
             ai_provider=args.ai_provider,
         )
         print_goal_summary(goal)
-        print("\nTip: use `--plan`, `--run-phase2`, `--run-phase3`, `--run-phase4`, or `--run-phase5` to continue.")
+        print(
+            "\nTip: use `--plan`, `--run-phase2`, `--run-phase3`, `--run-phase4`, "
+            "`--run-ai-phase4`, or `--run-phase5` to continue."
+        )
         return 0
 
     parser.print_help()

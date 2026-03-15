@@ -16,6 +16,10 @@ autonomous project workflow. The repository now includes:
   CLI and dashboard state
 - AI-Phase2: provider abstraction through local placeholder and OpenAI-ready
   provider interfaces without enabling live network execution
+- AI-Phase3: provider-assisted task planning with persisted planning rationale,
+  auditable plan adjustments, and AI-aware plan visualization
+- AI-Phase4: preview-only candidate code generation, patch preview artifacts,
+  local verification, and explicit review-required gating
 
 The current implementation remains intentionally conservative:
 
@@ -118,11 +122,14 @@ Available commands:
 - `--run-phase2`: execute the full minimal Phase2 closed-loop workflow.
 - `--run-phase3`: execute the Phase3 autonomous workflow with memory and batched task handling.
 - `--run-phase4`: execute the Phase4 autonomous workflow with versioned goals, task trees, and review packaging.
+- `--run-ai-phase4`: execute the AI-Phase4 preview-only candidate workflow with AI routing enabled.
 - `--run-phase5`: execute the Phase5 autonomous workflow with local memory, heuristic planning, and self-optimization.
 - `--memory-status`: show stored goal memory and vector-store placeholder state.
 - `--memory-query`: query historical goal, task, and workflow memory using local matching rules.
 - `--enable-ai`: route AI-capable tasks through `AIExecutor` using safe local placeholder behavior.
 - `--ai-provider`: choose the provider route for `--enable-ai`, such as `local_placeholder` or `openai`.
+- `--preview-patch`: show the latest preview-only candidate patch summaries and artifact paths.
+- `--review-candidates`: show the latest candidate items that require manual review.
 - `--visualize`: launch the Streamlit dashboard.
 - `--report`: show the latest Phase2, Phase3, Phase4, or Phase5 execution report.
 
@@ -138,8 +145,11 @@ python -m autonomous_project_development_agent --goal "Read a local project dire
 python -m autonomous_project_development_agent --goal "Read a local project directory, generate a module list, count Python files, and output a preliminary analysis report." --run-phase2 --enable-ai --ai-provider openai
 python -m autonomous_project_development_agent --goal "Inspect a local project, build a reusable module inventory, compute Python file metrics, and generate a safe autonomous implementation suggestion." --run-phase3
 python -m autonomous_project_development_agent --goal "Inspect a local project, recover relevant historical context, generate a dependency-aware task tree, prepare safe autonomous implementation suggestions, and produce an iteration review package." --run-phase4
+python -m autonomous_project_development_agent --goal "Inspect a local project, recover relevant historical context, generate a dependency-aware task tree, prepare safe autonomous implementation suggestions, and produce an iteration review package." --run-ai-phase4 --ai-provider local_placeholder
 python -m autonomous_project_development_agent --goal "Inspect a local project, reuse historical memory, generate a self-optimizing task tree, execute safe local analysis tasks, and produce a local autonomy review without external AI APIs." --run-phase5
 python -m autonomous_project_development_agent --goal "Inspect a local project, reuse historical memory, generate a self-optimizing task tree, execute safe local analysis tasks, and produce a local autonomy review with AI placeholder routing." --run-phase5 --enable-ai --ai-provider local_placeholder
+python -m autonomous_project_development_agent --preview-patch
+python -m autonomous_project_development_agent --review-candidates
 python -m autonomous_project_development_agent --memory-status
 python -m autonomous_project_development_agent --memory-query --goal "phase5"
 python -m autonomous_project_development_agent --visualize
@@ -160,6 +170,8 @@ The Streamlit view displays:
 - Phase1 task tree and latest Phase1 status
 - latest Phase2 to Phase5 goal, plan, loop state, logs, and final report
 - AI execution state, provider status, and AI-capable task routing
+- candidate preview summaries, patch preview artifacts, verification results,
+  and review-required items for AI-Phase4 code-assist tasks
 - memory placeholder state, historical goal browsing, task history, workflow history, and visualization summary payloads
 
 It remains lightweight, but now supports simple browsing interactions for
@@ -173,12 +185,15 @@ When Phase2 through Phase5 runs, the following files are written under `phase1_r
 - `plan.json`
 - `loop_state.json`
 - `final_report.json`
+- `ai_execution_state.json`
 - `memory_store.json`
 - `vector_store_placeholder.json`
 - `task_history.json`
 - `workflow_history.json`
 
 The shared log stream is written to `phase1_runtime/logs/execution_log.jsonl`.
+Preview-only candidate artifacts are written to `phase1_runtime/artifacts/`, including
+candidate preview JSON, candidate code previews, and candidate verification JSON files.
 
 ## Documentation
 

@@ -11,10 +11,13 @@ Phase5 can replace these placeholders with real model calls, stronger
 isolation, approval-aware policies, and tool-specific execution sandboxes.
 AI-Phase1 adds a generic AIExecutor wrapper that keeps all AI behavior local
 and deterministic while exposing a future provider boundary.
+AI-Phase4 extends that wrapper with preview-only candidate code generation,
+patch-summary artifacts, and local verification before any future apply step.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
@@ -990,6 +993,136 @@ class GPTExecutor(BaseExecutor):
         }
 
 
+def _resolve_candidate_target_path(target_project_dir: str, target_file: str) -> Path:
+    """Resolve a candidate target file relative to the inspected project root."""
+
+    target_root = Path(target_project_dir).resolve()
+    return (target_root / target_file).resolve()
+
+
+def _path_is_within(base_path: Path, candidate_path: Path) -> bool:
+    """Return True when one path is safely nested under another."""
+
+    try:
+        candidate_path.relative_to(base_path)
+        return True
+    except ValueError:
+        return False
+
+
+def _verify_candidate_preview(
+    task: PlannedTask,
+    context: ExecutionContext,
+    candidate_preview: dict[str, Any],
+) -> dict[str, Any]:
+    """Run safe local checks for preview-only candidate code artifacts."""
+
+    target_project_dir = Path(context.target_project_dir).resolve()
+    target_file = str(candidate_preview.get("target_file", ""))
+    target_path = _resolve_candidate_target_path(context.target_project_dir, target_file)
+    restricted_roots = {".git", "venv", "__pycache__", "phase1_runtime"}
+    relative_parts: tuple[str, ...]
+    try:
+        relative_parts = target_path.relative_to(target_project_dir).parts
+    except ValueError:
+        relative_parts = ()
+
+    path_safety_check = bool(relative_parts) and relative_parts[0] not in restricted_roots
+    target_parent_exists = target_path.parent.exists()
+    target_file_exists = target_path.exists()
+    candidate_code = str(candidate_preview.get("candidate_code", ""))
+
+    syntax_validation = False
+    smoke_test_contains_symbol = False
+    smoke_test_has_preview_marker = "preview" in candidate_code.lower()
+    syntax_error = None
+    if candidate_code.strip():
+        try:
+            parsed = ast.parse(candidate_code, filename=target_file or "<candidate_preview>")
+            compile(parsed, target_file or "<candidate_preview>", "exec")
+            syntax_validation = True
+            smoke_test_contains_symbol = any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                for node in ast.walk(parsed)
+            )
+        except SyntaxError as exc:
+            syntax_error = str(exc)
+
+    change_type = str(candidate_preview.get("candidate_change_type", "add_preview_module"))
+    preview_only = bool(candidate_preview.get("preview_only", True))
+    target_ready = target_file_exists or change_type.startswith("add_")
+    verification_passed = all(
+        [
+            bool(target_file),
+            _path_is_within(target_project_dir, target_path),
+            path_safety_check,
+            target_parent_exists,
+            syntax_validation,
+            smoke_test_contains_symbol,
+            preview_only,
+            target_ready,
+        ]
+    )
+
+    return {
+        "task_id": task.task_id,
+        "target_file": target_file,
+        "target_path": str(target_path),
+        "target_within_project": _path_is_within(target_project_dir, target_path),
+        "path_safety_check": path_safety_check,
+        "target_parent_exists": target_parent_exists,
+        "target_file_exists": target_file_exists,
+        "syntax_validation": syntax_validation,
+        "syntax_error": syntax_error,
+        "smoke_tests": {
+            "contains_symbol_definition": smoke_test_contains_symbol,
+            "has_preview_marker": smoke_test_has_preview_marker,
+            "line_count": len(candidate_code.splitlines()),
+        },
+        "preview_only": preview_only,
+        "not_applied": bool(candidate_preview.get("not_applied", True)),
+        "requires_review": bool(candidate_preview.get("requires_review", True)),
+        "risk_level": candidate_preview.get("risk_level", "low"),
+        "verification_passed": verification_passed,
+        "apply_allowed": False,
+        "review_status": "requires_review" if candidate_preview.get("requires_review", True) else "optional_review",
+    }
+
+
+def _persist_candidate_preview_artifacts(
+    task: PlannedTask,
+    context: ExecutionContext,
+    candidate_preview: dict[str, Any],
+    verification: dict[str, Any],
+) -> dict[str, str]:
+    """Persist preview-only candidate artifacts to the runtime artifact directory."""
+
+    artifacts_dir = Path(context.artifacts_dir)
+    preview_artifact_path = artifacts_dir / str(
+        task.metadata.get("candidate_preview_artifact_name", f"{task.task_id}_candidate_preview.json")
+    )
+    code_artifact_path = artifacts_dir / str(
+        task.metadata.get("candidate_code_artifact_name", f"{task.task_id}_candidate_preview.py")
+    )
+    verification_artifact_path = artifacts_dir / str(
+        task.metadata.get("candidate_verification_artifact_name", f"{task.task_id}_candidate_verification.json")
+    )
+    preview_artifact_path.write_text(
+        json.dumps(candidate_preview, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    code_artifact_path.write_text(str(candidate_preview.get("candidate_code", "")) + "\n", encoding="utf-8")
+    verification_artifact_path.write_text(
+        json.dumps(verification, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "candidate_preview_artifact": str(preview_artifact_path),
+        "candidate_code_artifact": str(code_artifact_path),
+        "candidate_verification_artifact": str(verification_artifact_path),
+    }
+
+
 class AIExecutor(BaseExecutor):
     """Wrap AI-capable placeholder executors behind one AI provider boundary.
 
@@ -1025,6 +1158,7 @@ class AIExecutor(BaseExecutor):
             )
         )
         prompt_preview = render_task_prompt(task, goal, context.memory_state)
+        request_kind = str(task.metadata.get("ai_request_kind", "task_execution"))
         provider_request = AIProviderRequest(
             provider_name=self.provider_name,
             task_id=task.task_id,
@@ -1038,10 +1172,17 @@ class AIExecutor(BaseExecutor):
             target_project_dir=context.target_project_dir,
             task_title=task.title,
             metadata={
+                "request_kind": request_kind,
                 "delegated_executor_type": self.delegated_executor_type,
                 "attempt": attempt,
                 "goal_version": context.goal_version,
                 "ai_provider_config": context.ai_provider_config,
+                "candidate_target_file": task.metadata.get("candidate_target_file"),
+                "candidate_change_type": task.metadata.get("candidate_change_type"),
+                "preview_only": task.metadata.get("preview_only", True),
+                "not_applied": task.metadata.get("not_applied", True),
+                "requires_review": task.metadata.get("requires_review", True),
+                "risk_level": task.metadata.get("risk_level", "low"),
             },
         )
         provider_response = provider.generate(provider_request)
@@ -1050,6 +1191,7 @@ class AIExecutor(BaseExecutor):
             "provider": provider_response.provider_name,
             "delegated_executor_type": self.delegated_executor_type,
             "task_use_ai": task.use_ai,
+            "request_kind": request_kind,
             "task_prompt_template": task.ai_prompt_template or task.prompt_template,
             "task_prompt_preview": prompt_preview,
             "provider_request": provider_request.to_dict(),
@@ -1058,6 +1200,82 @@ class AIExecutor(BaseExecutor):
             "external_api_called": False,
         }
         output = dict(delegated_result.output)
+        callback_events = list(delegated_result.callback_events)
+        candidate_preview: dict[str, Any] | None = None
+        verification_payload: dict[str, Any] | None = None
+        candidate_artifacts: dict[str, str] = {}
+        candidate_verification_failed = False
+        candidate_preview_complete = False
+        review_required = False
+
+        if request_kind in {"code_assist", "patch_preview"}:
+            provider_candidate = dict(provider_response.metadata)
+            candidate_preview = {
+                "task_id": task.task_id,
+                "goal_id": context.goal_id,
+                "phase": context.phase,
+                "provider": provider_response.provider_name,
+                "provider_mode": provider_response.mode,
+                "candidate_code": provider_candidate.get("candidate_code", ""),
+                "candidate_patch_summary": provider_candidate.get("candidate_patch_summary", []),
+                "target_file": provider_candidate.get("target_file", task.metadata.get("candidate_target_file")),
+                "rationale": provider_candidate.get("rationale", ""),
+                "risk_level": provider_candidate.get("risk_level", "low"),
+                "preview_only": bool(provider_candidate.get("preview_only", task.metadata.get("preview_only", True))),
+                "not_applied": bool(provider_candidate.get("not_applied", task.metadata.get("not_applied", True))),
+                "requires_review": bool(provider_candidate.get("requires_review", task.metadata.get("requires_review", True))),
+                "labels": list(provider_candidate.get("labels", ["preview_only", "not_applied", "requires_review"])),
+                "candidate_change_type": provider_candidate.get(
+                    "candidate_change_type",
+                    task.metadata.get("candidate_change_type", "add_preview_module"),
+                ),
+                "patch_preview_markdown": "\n".join(
+                    [
+                        "# Candidate Patch Preview",
+                        "",
+                        f"- Task: {task.task_id}",
+                        f"- Target file: {provider_candidate.get('target_file', task.metadata.get('candidate_target_file', 'unknown'))}",
+                        f"- Risk level: {provider_candidate.get('risk_level', 'low')}",
+                        "- Labels: preview_only, not_applied, requires_review",
+                        "",
+                        "## Rationale",
+                        str(provider_candidate.get("rationale", "No rationale available.")),
+                    ]
+                ),
+            }
+            verification_payload = _verify_candidate_preview(task, context, candidate_preview)
+            candidate_artifacts = _persist_candidate_preview_artifacts(
+                task,
+                context,
+                candidate_preview,
+                verification_payload,
+            )
+            candidate_preview_complete = bool(verification_payload.get("verification_passed", False))
+            candidate_verification_failed = not candidate_preview_complete
+            review_required = bool(verification_payload.get("requires_review", False))
+            candidate_preview.update(candidate_artifacts)
+            output["candidate_preview"] = candidate_preview
+            output["candidate_code"] = candidate_preview.get("candidate_code", "")
+            output["candidate_patch_summary"] = candidate_preview.get("candidate_patch_summary", [])
+            output["target_file"] = candidate_preview.get("target_file")
+            output["rationale"] = candidate_preview.get("rationale")
+            output["risk_level"] = candidate_preview.get("risk_level")
+            output["preview_only"] = candidate_preview.get("preview_only", True)
+            output["not_applied"] = candidate_preview.get("not_applied", True)
+            output["requires_review"] = review_required
+            output["candidate_verification"] = verification_payload
+            output["preview_status"] = "preview_complete" if candidate_preview_complete else "verification_failed"
+            output.update(candidate_artifacts)
+            callback_events.append(
+                {
+                    "event": task.callback_channel or "candidate_preview_ready",
+                    "task_id": task.task_id,
+                    "candidate_preview_artifact": candidate_artifacts.get("candidate_preview_artifact"),
+                    "candidate_code_artifact": candidate_artifacts.get("candidate_code_artifact"),
+                    "candidate_verification_artifact": candidate_artifacts.get("candidate_verification_artifact"),
+                }
+            )
+
         output["ai_execution"] = ai_metadata
         output["provider_content"] = provider_response.content
         statistics = dict(delegated_result.statistics)
@@ -1065,6 +1283,10 @@ class AIExecutor(BaseExecutor):
         statistics["provider_name"] = provider_response.provider_name
         statistics["provider_mode"] = provider_response.mode
         statistics["provider_latency_seconds"] = provider_response.latency_seconds
+        statistics["candidate_preview_generated"] = bool(candidate_preview)
+        statistics["candidate_preview_complete"] = candidate_preview_complete
+        statistics["candidate_verification_failed"] = candidate_verification_failed
+        statistics["review_required"] = review_required
         visualization_data = dict(delegated_result.visualization_data)
         visualization_data.update(
             {
@@ -1074,8 +1296,16 @@ class AIExecutor(BaseExecutor):
                 "ai_enabled": context.enable_ai,
                 "provider_name": provider_response.provider_name,
                 "provider_mode": provider_response.mode,
+                "preview_status": output.get("preview_status"),
+                "review_required": review_required,
+                "target_file": output.get("target_file"),
             }
         )
+        success = delegated_result.success and not candidate_verification_failed
+        returncode = delegated_result.returncode if success else 1
+        error = delegated_result.error
+        if candidate_verification_failed:
+            error = "Candidate preview verification failed."
         return TaskResult(
             task_id=delegated_result.task_id,
             module_name=delegated_result.module_name,
@@ -1083,18 +1313,18 @@ class AIExecutor(BaseExecutor):
             executor_type=self.executor_type,
             requested_executor_type=self.delegated_executor_type,
             attempt=delegated_result.attempt,
-            success=delegated_result.success,
-            returncode=delegated_result.returncode,
+            success=success,
+            returncode=returncode,
             started_at=delegated_result.started_at,
             finished_at=delegated_result.finished_at,
             duration_seconds=delegated_result.duration_seconds,
             output=output,
             output_text=f"{delegated_result.output_text}\n\n[provider]\n{provider_response.content}",
             artifact_path=delegated_result.artifact_path,
-            error=delegated_result.error,
+            error=error,
             statistics=statistics,
             visualization_data=visualization_data,
-            callback_events=delegated_result.callback_events,
+            callback_events=callback_events,
             ai_metadata=ai_metadata,
         )
 

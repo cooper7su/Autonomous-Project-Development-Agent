@@ -83,6 +83,8 @@ class AnalysisReport:
     summary: str
     recommended_action: str
     human_intervention_required: bool
+    review_required: bool = False
+    preview_status: str | None = None
     verification_checks: dict[str, Any] = field(default_factory=dict)
     confidence_score: float = 0.0
     visualization_payload: dict[str, Any] = field(default_factory=dict)
@@ -112,6 +114,110 @@ def analyze_task_result(
         "duration_seconds": result.duration_seconds,
     }
     operation = task.metadata.get("operation")
+    is_code_assist_task = str(task.metadata.get("ai_request_kind", "")).strip().lower() in {"code_assist", "patch_preview"}
+
+    if is_code_assist_task and context.enable_ai:
+        candidate_preview = result.output.get("candidate_preview", {})
+        candidate_verification = result.output.get("candidate_verification", {})
+        summary_markdown = result.output.get("summary_markdown", "")
+        checks["summary_present"] = bool(summary_markdown.strip())
+        checks["candidate_preview_present"] = bool(candidate_preview)
+        checks["candidate_code_present"] = bool(str(result.output.get("candidate_code", "")).strip())
+        checks["patch_summary_count"] = len(result.output.get("candidate_patch_summary", []))
+        checks["preview_status"] = result.output.get("preview_status")
+        checks["preview_only"] = bool(result.output.get("preview_only", False))
+        checks["not_applied"] = bool(result.output.get("not_applied", False))
+        checks["review_required"] = bool(result.output.get("requires_review", False))
+        checks["verification_present"] = bool(candidate_verification)
+        checks["verification_passed"] = bool(candidate_verification.get("verification_passed", False))
+        checks["path_safety_check"] = bool(candidate_verification.get("path_safety_check", False))
+        checks["syntax_validation"] = bool(candidate_verification.get("syntax_validation", False))
+        checks["target_within_project"] = bool(candidate_verification.get("target_within_project", False))
+        checks["candidate_preview_artifact_exists"] = bool(
+            result.output.get("candidate_preview_artifact")
+            and Path(str(result.output.get("candidate_preview_artifact"))).exists()
+        )
+        checks["candidate_code_artifact_exists"] = bool(
+            result.output.get("candidate_code_artifact")
+            and Path(str(result.output.get("candidate_code_artifact"))).exists()
+        )
+        checks["candidate_verification_artifact_exists"] = bool(
+            result.output.get("candidate_verification_artifact")
+            and Path(str(result.output.get("candidate_verification_artifact"))).exists()
+        )
+        passed = (
+            result.success
+            and checks["summary_present"]
+            and checks["candidate_preview_present"]
+            and checks["candidate_code_present"]
+            and checks["patch_summary_count"] >= 1
+            and checks["verification_passed"]
+            and checks["candidate_preview_artifact_exists"]
+            and checks["candidate_code_artifact_exists"]
+            and checks["candidate_verification_artifact_exists"]
+        )
+        review_required = bool(checks["review_required"])
+        preview_status = str(checks["preview_status"] or "unknown")
+        visualization_payload = {
+            "task_id": task.task_id,
+            "status": "passed" if passed else "failed",
+            "executor_type": task.executor_type,
+            "actual_executor_type": result.executor_type,
+            "priority": task.priority,
+            "execution_mode": task.execution_mode,
+            "parallel_group": task.parallel_group,
+            "use_ai": task.use_ai,
+            "ai_enabled": context.enable_ai,
+            "ai_provider": context.ai_provider,
+            "duration_seconds": result.duration_seconds,
+            "attempt": result.attempt,
+            "preview_status": preview_status,
+            "review_required": review_required,
+            "target_file": result.output.get("target_file"),
+            "risk_level": result.output.get("risk_level"),
+            "metrics": {
+                "verification_passed": checks["verification_passed"],
+                "patch_summary_count": checks["patch_summary_count"],
+            },
+        }
+        if passed:
+            return AnalysisReport(
+                task_id=task.task_id,
+                status="passed",
+                summary=f"Task '{task.task_id}' completed preview-only candidate generation and local verification.",
+                recommended_action="continue",
+                human_intervention_required=False,
+                review_required=review_required,
+                preview_status=preview_status,
+                verification_checks=checks,
+                confidence_score=0.9,
+                visualization_payload=visualization_payload,
+            )
+        if checks["candidate_preview_present"] and not checks["verification_passed"]:
+            return AnalysisReport(
+                task_id=task.task_id,
+                status="failed",
+                summary=f"Task '{task.task_id}' generated a candidate preview, but local verification failed and review is required.",
+                recommended_action="review_candidate",
+                human_intervention_required=True,
+                review_required=True,
+                preview_status=preview_status,
+                verification_checks=checks,
+                confidence_score=0.12,
+                visualization_payload=visualization_payload,
+            )
+        return AnalysisReport(
+            task_id=task.task_id,
+            status="retryable",
+            summary=f"Task '{task.task_id}' did not produce a complete candidate preview package yet.",
+            recommended_action="retry",
+            human_intervention_required=False,
+            review_required=review_required,
+            preview_status=preview_status,
+            verification_checks=checks,
+            confidence_score=0.3,
+            visualization_payload=visualization_payload,
+        )
 
     if task.task_id == "inspect_project_directory":
         checks["entry_count"] = result.output.get("top_level_entry_count", -1)
@@ -229,6 +335,8 @@ def analyze_task_result(
             summary=f"Task '{task.task_id}' satisfied the {context.phase} verification checks.",
             recommended_action="continue",
             human_intervention_required=False,
+            review_required=False,
+            preview_status=result.output.get("preview_status"),
             verification_checks=checks,
             confidence_score=confidence_score,
             visualization_payload=visualization_payload,
@@ -241,6 +349,8 @@ def analyze_task_result(
         summary=f"Task '{task.task_id}' did not satisfy the {context.phase} verification checks.",
         recommended_action="retry" if retryable else "human_intervention",
         human_intervention_required=not retryable,
+        review_required=False,
+        preview_status=result.output.get("preview_status"),
         verification_checks=checks,
         confidence_score=0.35 if retryable else 0.1,
         visualization_payload=visualization_payload,
@@ -486,6 +596,11 @@ def build_final_report(
     executor_breakdown: dict[str, int] = {}
     actual_executor_breakdown: dict[str, int] = {}
     provider_breakdown: dict[str, int] = {}
+    candidate_preview_count = 0
+    preview_completed_count = 0
+    review_required_count = 0
+    verification_failed_count = 0
+    candidate_previews: list[dict[str, Any]] = []
     duration_series: list[dict[str, Any]] = []
     retry_series: list[dict[str, Any]] = []
     ai_task_count = 0
@@ -502,6 +617,31 @@ def build_final_report(
             ai_task_count += 1
         if actual_executor_type == "ai_executor":
             ai_executed_task_count += 1
+        candidate_preview = record["result"].get("output", {}).get("candidate_preview")
+        candidate_verification = record["result"].get("output", {}).get("candidate_verification", {})
+        if candidate_preview:
+            candidate_preview_count += 1
+            preview_completed = record["result"].get("output", {}).get("preview_status") == "preview_complete"
+            if preview_completed:
+                preview_completed_count += 1
+            if record["analysis"].get("review_required", False):
+                review_required_count += 1
+            if not candidate_verification.get("verification_passed", False):
+                verification_failed_count += 1
+            candidate_previews.append(
+                {
+                    "task_id": record["task"].get("task_id"),
+                    "preview_status": record["result"].get("output", {}).get("preview_status"),
+                    "review_required": record["analysis"].get("review_required", False),
+                    "target_file": candidate_preview.get("target_file"),
+                    "risk_level": candidate_preview.get("risk_level"),
+                    "provider": candidate_preview.get("provider"),
+                    "candidate_preview_artifact": record["result"].get("output", {}).get("candidate_preview_artifact"),
+                    "candidate_code_artifact": record["result"].get("output", {}).get("candidate_code_artifact"),
+                    "candidate_verification_artifact": record["result"].get("output", {}).get("candidate_verification_artifact"),
+                    "verification_passed": candidate_verification.get("verification_passed", False),
+                }
+            )
         duration_series.append(
             {
                 "task_id": record["task"].get("task_id"),
@@ -561,6 +701,14 @@ def build_final_report(
             "ai_executed_task_count": ai_executed_task_count,
             "provider_breakdown": provider_breakdown,
         },
+        "candidate_summary": {
+            "candidate_preview_count": candidate_preview_count,
+            "preview_completed_count": preview_completed_count,
+            "review_required_count": review_required_count,
+            "verification_failed_count": verification_failed_count,
+        },
+        "candidate_previews": candidate_previews,
+        "review_required_items": [entry for entry in candidate_previews if entry.get("review_required")],
         "dependency_edges": plan_payload.get("dependency_edges", []),
         "duration_series": duration_series,
         "retry_series": retry_series,
@@ -586,6 +734,9 @@ def build_final_report(
             "goal_version": plan_payload.get("goal_version", goal_payload.get("goal_version", 1)),
             "task_count": plan_payload.get("task_count", 0),
             "parallel_task_count": plan_payload.get("parallel_task_count", 0),
+            "candidate_task_count": plan_payload.get("candidate_task_count", 0),
+            "preview_only_task_count": plan_payload.get("preview_only_task_count", 0),
+            "review_required_task_count": plan_payload.get("review_required_task_count", 0),
             "executor_breakdown": plan_payload.get("executor_breakdown", {}),
             "heuristic_adjustments": plan_payload.get("heuristic_adjustments", []),
             "planning": plan_payload.get("planning", {}),
@@ -600,6 +751,10 @@ def build_final_report(
             "goal_use_ai": bool(goal_payload.get("use_ai", False)),
             "ai_task_count": ai_task_count,
             "ai_executed_task_count": ai_executed_task_count,
+            "candidate_preview_count": candidate_preview_count,
+            "preview_completed_count": preview_completed_count,
+            "review_required_count": review_required_count,
+            "verification_failed_count": verification_failed_count,
             "total_duration_seconds": total_duration,
             "average_confidence_score": average_confidence,
         },
@@ -613,6 +768,10 @@ def build_final_report(
             "parallel_task_count": plan_payload.get("parallel_task_count", 0),
             "ai_task_count": ai_task_count,
             "ai_executed_task_count": ai_executed_task_count,
+            "candidate_preview_count": candidate_preview_count,
+            "preview_completed_count": preview_completed_count,
+            "review_required_count": review_required_count,
+            "verification_failed_count": verification_failed_count,
             "task_profile_count": task_history_state.get("task_profile_count", 0),
             "workflow_run_count": workflow_history_state.get("run_count", 0),
         },
@@ -626,6 +785,7 @@ def build_final_report(
             "recent_runs": workflow_history_state.get("recent_runs", [])[:20],
         },
         "self_optimization": self_optimization,
+        "candidate_previews": candidate_previews,
         "tasks": task_records,
         "loop_state": loop_state_payload,
         "visualization": visualization,

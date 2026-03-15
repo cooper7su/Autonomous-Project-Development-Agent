@@ -11,6 +11,9 @@ replanning, approval-aware routing, and richer project-specific planners.
 AI-Phase1 adds task-level AI flags and prompt-template placeholders.
 AI-Phase3 adds provider-assisted task planning while keeping the final plan
 fully local, deterministic, and auditable.
+AI-Phase4 adds preview-only code-assist task metadata so candidate code,
+patch previews, and review gating can be routed through the AI provider layer
+without mutating repository files.
 """
 
 from __future__ import annotations
@@ -29,6 +32,13 @@ def is_ai_executor_type(executor_type: str) -> bool:
     """Return True when an executor type represents an AI-capable route."""
 
     return executor_type in AI_EXECUTOR_TYPES
+
+
+def is_ai_code_assist_task(task: PlannedTask) -> bool:
+    """Return True when a task is configured for AI-assisted code preview flow."""
+
+    request_kind = str(task.metadata.get("ai_request_kind", "")).strip().lower()
+    return request_kind in {"code_assist", "patch_preview"} or bool(task.metadata.get("candidate_preview_enabled"))
 
 
 @dataclass(frozen=True)
@@ -253,6 +263,10 @@ def _apply_ai_assisted_planning(
             priority_delta += 6
             retry_delta += 1
             notes.append("ai_capable_task_priority_boost")
+
+        if is_ai_code_assist_task(task):
+            priority_delta += 4
+            notes.append("ai_code_assist_preview_priority_boost")
 
         if goal.phase == "Phase2" and task.task_id in {"generate_module_list", "count_python_files"}:
             payload["execution_mode"] = "parallel"
@@ -530,6 +544,16 @@ def _generate_phase3_task_plan(goal: ProjectGoal) -> list[PlannedTask]:
                 "artifact_name": "autonomous_stub_suggestion.json",
                 "code_artifact_name": "autonomous_stub_preview.py",
                 "target_dir": target_dir,
+                "ai_request_kind": "code_assist",
+                "candidate_preview_enabled": True,
+                "preview_only": True,
+                "not_applied": True,
+                "requires_review": True,
+                "candidate_target_file": "src/autonomous_project_development_agent/phase3_candidate_stub.py",
+                "candidate_change_type": "add_preview_module",
+                "candidate_preview_artifact_name": "autonomous_stub_candidate_preview.json",
+                "candidate_code_artifact_name": "autonomous_stub_candidate.py",
+                "candidate_verification_artifact_name": "autonomous_stub_candidate_verification.json",
             },
         ),
     ]
@@ -682,6 +706,16 @@ def _generate_phase4_task_plan(goal: ProjectGoal) -> list[PlannedTask]:
                 "artifact_name": "phase4_change_suggestion.json",
                 "code_artifact_name": "phase4_autonomous_preview.py",
                 "target_dir": target_dir,
+                "ai_request_kind": "code_assist",
+                "candidate_preview_enabled": True,
+                "preview_only": True,
+                "not_applied": True,
+                "requires_review": True,
+                "candidate_target_file": "src/autonomous_project_development_agent/phase4_candidate_bundle.py",
+                "candidate_change_type": "add_preview_module",
+                "candidate_preview_artifact_name": "phase4_candidate_preview.json",
+                "candidate_code_artifact_name": "phase4_candidate_bundle_preview.py",
+                "candidate_verification_artifact_name": "phase4_candidate_verification.json",
             },
         ),
         PlannedTask(
@@ -928,6 +962,16 @@ def _generate_phase5_task_plan(goal: ProjectGoal) -> list[PlannedTask]:
                 "code_artifact_name": "phase5_local_automation_preview.py",
                 "target_dir": target_dir,
                 "phase5_category": "optimization",
+                "ai_request_kind": "code_assist",
+                "candidate_preview_enabled": True,
+                "preview_only": True,
+                "not_applied": True,
+                "requires_review": True,
+                "candidate_target_file": "src/autonomous_project_development_agent/phase5_candidate_bundle.py",
+                "candidate_change_type": "add_preview_module",
+                "candidate_preview_artifact_name": "phase5_candidate_preview.json",
+                "candidate_code_artifact_name": "phase5_candidate_bundle_preview.py",
+                "candidate_verification_artifact_name": "phase5_candidate_verification.json",
             },
         )
     )
@@ -1032,6 +1076,9 @@ def build_plan_payload(
     resolved_phase = phase or goal.phase
     parallel_task_count = sum(1 for task in tasks if task.execution_mode == "parallel")
     ai_task_count = sum(1 for task in tasks if task.use_ai)
+    candidate_task_count = sum(1 for task in tasks if is_ai_code_assist_task(task))
+    preview_only_task_count = sum(1 for task in tasks if bool(task.metadata.get("preview_only", False)))
+    review_required_task_count = sum(1 for task in tasks if bool(task.metadata.get("requires_review", False)))
     planning_state = planning_state or _build_rule_based_planning_state(goal, tasks)
 
     executor_breakdown: dict[str, int] = {}
@@ -1069,6 +1116,9 @@ def build_plan_payload(
         "ai_provider": goal.ai_provider,
         "task_count": len(tasks),
         "ai_task_count": ai_task_count,
+        "candidate_task_count": candidate_task_count,
+        "preview_only_task_count": preview_only_task_count,
+        "review_required_task_count": review_required_task_count,
         "parallel_task_count": parallel_task_count,
         "sequential_task_count": len(tasks) - parallel_task_count,
         "retry_budget_total": sum(task.max_retries for task in tasks),

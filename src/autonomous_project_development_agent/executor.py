@@ -23,6 +23,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
 
+from .ai_provider import AIProviderRequest, resolve_ai_provider
 from .goal_framework import ProjectGoal
 from .task_planning import PlannedTask, is_ai_executor_type, render_task_prompt
 
@@ -51,6 +52,7 @@ class ExecutionContext:
     goal_payload: dict[str, Any] = field(default_factory=dict)
     enable_ai: bool = False
     ai_provider: str = "disabled"
+    ai_provider_config: dict[str, Any] = field(default_factory=dict)
     prior_results: list[dict[str, Any]] = field(default_factory=list)
     memory_state: dict[str, Any] = field(default_factory=dict)
     task_history: dict[str, Any] = field(default_factory=dict)
@@ -989,21 +991,24 @@ class GPTExecutor(BaseExecutor):
 
 
 class AIExecutor(BaseExecutor):
-    """Wrap AI-capable placeholder executors behind one AI-Phase1 boundary.
+    """Wrap AI-capable placeholder executors behind one AI provider boundary.
 
-    AI-Phase1 does not call external providers. Instead, this wrapper routes
-    AI-marked tasks to the existing safe local placeholder executors and
-    annotates their results with prompt previews and AI execution metadata.
+    AI-Phase2 keeps all provider calls local and deterministic. The wrapper
+    still delegates task-specific artifact generation to the existing safe
+    placeholder executors, but provider selection and response normalization are
+    now handled through `ai_provider.py`.
     """
 
     executor_type = "ai_executor"
 
-    def __init__(self, delegated_executor_type: str) -> None:
+    def __init__(self, delegated_executor_type: str, provider_name: str) -> None:
         self.delegated_executor_type = delegated_executor_type
+        self.provider_name = provider_name
 
     def execute(self, task: PlannedTask, context: ExecutionContext, attempt: int = 1) -> TaskResult:
         delegated_executor = _build_direct_executor(self.delegated_executor_type)
         delegated_result = delegated_executor.execute(task, context, attempt=attempt)
+        provider = resolve_ai_provider(self.provider_name)
         goal = (
             ProjectGoal.from_dict(context.goal_payload)
             if context.goal_payload
@@ -1020,20 +1025,46 @@ class AIExecutor(BaseExecutor):
             )
         )
         prompt_preview = render_task_prompt(task, goal, context.memory_state)
+        provider_request = AIProviderRequest(
+            provider_name=self.provider_name,
+            task_id=task.task_id,
+            goal_id=context.goal_id,
+            phase=context.phase,
+            prompt=prompt_preview,
+            system_prompt=(
+                "Return safe, read-only placeholder output. "
+                "Do not mutate files or assume external tool access."
+            ),
+            target_project_dir=context.target_project_dir,
+            task_title=task.title,
+            metadata={
+                "delegated_executor_type": self.delegated_executor_type,
+                "attempt": attempt,
+                "goal_version": context.goal_version,
+                "ai_provider_config": context.ai_provider_config,
+            },
+        )
+        provider_response = provider.generate(provider_request)
         ai_metadata = {
             "enabled": context.enable_ai,
-            "provider": context.ai_provider,
+            "provider": provider_response.provider_name,
             "delegated_executor_type": self.delegated_executor_type,
             "task_use_ai": task.use_ai,
             "task_prompt_template": task.ai_prompt_template or task.prompt_template,
             "task_prompt_preview": prompt_preview,
-            "mode": "local_placeholder",
+            "provider_request": provider_request.to_dict(),
+            "provider_response": provider_response.to_dict(),
+            "mode": provider_response.mode,
             "external_api_called": False,
         }
         output = dict(delegated_result.output)
         output["ai_execution"] = ai_metadata
+        output["provider_content"] = provider_response.content
         statistics = dict(delegated_result.statistics)
         statistics["delegated_executor_type"] = self.delegated_executor_type
+        statistics["provider_name"] = provider_response.provider_name
+        statistics["provider_mode"] = provider_response.mode
+        statistics["provider_latency_seconds"] = provider_response.latency_seconds
         visualization_data = dict(delegated_result.visualization_data)
         visualization_data.update(
             {
@@ -1041,6 +1072,8 @@ class AIExecutor(BaseExecutor):
                 "delegated_executor_type": self.delegated_executor_type,
                 "use_ai": task.use_ai,
                 "ai_enabled": context.enable_ai,
+                "provider_name": provider_response.provider_name,
+                "provider_mode": provider_response.mode,
             }
         )
         return TaskResult(
@@ -1056,7 +1089,7 @@ class AIExecutor(BaseExecutor):
             finished_at=delegated_result.finished_at,
             duration_seconds=delegated_result.duration_seconds,
             output=output,
-            output_text=delegated_result.output_text,
+            output_text=f"{delegated_result.output_text}\n\n[provider]\n{provider_response.content}",
             artifact_path=delegated_result.artifact_path,
             error=delegated_result.error,
             statistics=statistics,
@@ -1084,7 +1117,7 @@ def build_executor(task: PlannedTask, context: ExecutionContext) -> BaseExecutor
     """Return the executor implementation for a planned task."""
 
     if task.use_ai and context.enable_ai and is_ai_executor_type(task.executor_type):
-        return AIExecutor(task.executor_type)
+        return AIExecutor(task.executor_type, context.ai_provider)
     return _build_direct_executor(task.executor_type)
 
 

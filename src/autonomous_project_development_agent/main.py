@@ -33,6 +33,10 @@ if __package__ in {None, ""}:
         PLACEHOLDER_LOGS,
         __version__,
     )
+    from autonomous_project_development_agent.ai_provider import (  # type: ignore
+        load_ai_provider_config,
+        provider_status_snapshot,
+    )
     from autonomous_project_development_agent.executor import (  # type: ignore
         ExecutionContext,
         TaskResult as WorkflowTaskResult,
@@ -84,6 +88,7 @@ else:
         PLACEHOLDER_LOGS,
         __version__,
     )
+    from .ai_provider import load_ai_provider_config, provider_status_snapshot
     from .executor import ExecutionContext, TaskResult as WorkflowTaskResult, execute_task_batch
     from .goal_framework import (
         ProjectGoal,
@@ -230,6 +235,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--enable-ai",
         action="store_true",
         help="Enable AIExecutor for AI-capable placeholder tasks while keeping execution local and safe.",
+    )
+    parser.add_argument(
+        "--ai-provider",
+        default=None,
+        help="AI provider route to use when --enable-ai is active. Defaults to APDA_AI_PROVIDER or local_placeholder.",
     )
     return parser
 
@@ -404,16 +414,24 @@ def persist_ai_execution_state(
     enabled: bool,
     goal: ProjectGoal | None = None,
     tasks: list[PlannedTask] | None = None,
+    ai_provider: str | None = None,
     actual_ai_executor_runs: int = 0,
 ) -> dict[str, Any]:
     """Persist a structured AI execution state snapshot for CLI and Streamlit."""
 
     tasks = tasks or []
+    provider_name = goal.ai_provider if goal else (ai_provider or ("local_placeholder" if enabled else "disabled"))
+    provider_config = load_ai_provider_config(provider_name if enabled else "local_placeholder")
+    provider_status = provider_status_snapshot(provider_config)
+    if not enabled:
+        provider_status["provider_name"] = "disabled"
+        provider_status["allow_live_calls"] = False
+
     payload = {
         "updated_at": utc_now(),
         "phase": phase,
         "enabled": enabled,
-        "ai_provider": goal.ai_provider if goal else ("local_placeholder" if enabled else "disabled"),
+        "ai_provider": provider_name if enabled else "disabled",
         "goal_id": goal.goal_id if goal else None,
         "goal_use_ai": bool(goal.use_ai) if goal else enabled,
         "goal_prompt_preview": render_goal_ai_prompt(goal) if goal else None,
@@ -427,6 +445,7 @@ def persist_ai_execution_state(
             "CodexExecutor",
             "GPTExecutor",
         ],
+        "provider_status": provider_status,
     }
     write_json_file(ai_execution_state_path(base_dir), payload)
     return payload
@@ -885,6 +904,7 @@ def resolve_goal(
     *,
     phase: str,
     enable_ai: bool = False,
+    ai_provider: str | None = None,
 ) -> ProjectGoal:
     """Load an existing goal or create a new one for the requested phase."""
     ensure_runtime_tree(base_dir)
@@ -910,18 +930,25 @@ def resolve_goal(
             phase=phase,
             priority=priority,
             enable_ai=enable_ai,
+            ai_provider=ai_provider,
             enable_memory=enable_memory,
             state_dir=state_dir(base_dir),
         )
     elif existing and existing.get("phase") == phase:
         goal = ProjectGoal.from_dict(existing)
-        if goal.use_ai != enable_ai or Path(goal.target_project_dir).resolve() != Path(project_dir).resolve():
+        requested_provider = ai_provider or ("local_placeholder" if enable_ai else "disabled")
+        if (
+            goal.use_ai != enable_ai
+            or goal.ai_provider != requested_provider
+            or Path(goal.target_project_dir).resolve() != Path(project_dir).resolve()
+        ):
             goal = build_project_goal(
                 goal.raw_goal,
                 project_dir,
                 phase=phase,
                 priority=priority,
                 enable_ai=enable_ai,
+                ai_provider=ai_provider,
                 enable_memory=enable_memory,
                 state_dir=state_dir(base_dir),
             )
@@ -932,6 +959,7 @@ def resolve_goal(
             phase=phase,
             priority=priority,
             enable_ai=enable_ai,
+            ai_provider=ai_provider,
             enable_memory=enable_memory,
             state_dir=state_dir(base_dir),
         )
@@ -1004,6 +1032,7 @@ def build_execution_context(
         goal_payload=goal.to_dict(),
         enable_ai=enable_ai,
         ai_provider=goal.ai_provider,
+        ai_provider_config=load_ai_provider_config(goal.ai_provider).to_dict(),
         prior_results=prior_results,
         memory_state=memory_state or {},
         task_history=task_history or {},
@@ -1087,6 +1116,7 @@ def print_workflow_report(report: dict[str, Any]) -> None:
     if statistics:
         print(f"- Completed batches: {statistics.get('completed_batches', 0)}")
         print(f"- Parallel task count: {statistics.get('parallel_task_count', 0)}")
+        print(f"- Provider breakdown: {statistics.get('provider_breakdown', {})}")
         print(f"- Task profiles: {statistics.get('task_profile_count', 0)}")
         print(f"- Workflow runs: {statistics.get('workflow_run_count', 0)}")
 
@@ -1209,15 +1239,16 @@ def print_status_overview(base_dir: Path | str) -> None:
     print(f"- Goal use_ai: {current_ai_state.get('goal_use_ai', False)}")
     print(f"- AI tasks in latest plan: {current_ai_state.get('ai_task_count', 0)}")
     print(f"- AIExecutor runs in latest workflow: {current_ai_state.get('actual_ai_executor_runs', 0)}")
+    print(f"- Provider status: {current_ai_state.get('provider_status', {})}")
 
 
-def run_phase1(base_dir: Path | str, *, enable_ai: bool = False) -> int:
+def run_phase1(base_dir: Path | str, *, enable_ai: bool = False, ai_provider: str | None = None) -> int:
     """Run the full safe Phase1 task set without adding later-phase behavior."""
     created = initialize_phase1_tree(base_dir)
     root = runtime_root(base_dir)
     write_task_scripts(base_dir)
     initialize_phase1_status(base_dir, enable_ai=enable_ai)
-    persist_ai_execution_state(base_dir, phase="Phase1", enabled=enable_ai, tasks=[])
+    persist_ai_execution_state(base_dir, phase="Phase1", enabled=enable_ai, tasks=[], ai_provider=ai_provider)
 
     validation_results = list(iter_validation_results())
     if not all(result.ok for result in validation_results):
@@ -1268,10 +1299,18 @@ def plan_workflow(
     *,
     phase: str,
     enable_ai: bool = False,
+    ai_provider: str | None = None,
 ) -> tuple[ProjectGoal, list[PlannedTask], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Resolve a workflow goal, update local memory, and generate a task plan."""
     ensure_runtime_tree(base_dir)
-    goal = resolve_goal(base_dir, goal_text, project_dir, phase=phase, enable_ai=enable_ai)
+    goal = resolve_goal(
+        base_dir,
+        goal_text,
+        project_dir,
+        phase=phase,
+        enable_ai=enable_ai,
+        ai_provider=ai_provider,
+    )
 
     memory_state = load_memory_status(state_dir(base_dir))
     if phase in {"Phase3", "Phase4", "Phase5"} and goal.memory_enabled:
@@ -1323,6 +1362,7 @@ def run_autonomous_phase(
     *,
     phase: str,
     enable_ai: bool = False,
+    ai_provider: str | None = None,
 ) -> int:
     """Execute the Phase2, Phase3, Phase4, or Phase5 autonomous workflow."""
     goal, tasks, plan_payload, memory_state, task_history_state = plan_workflow(
@@ -1331,6 +1371,7 @@ def run_autonomous_phase(
         project_dir,
         phase=phase,
         enable_ai=enable_ai,
+        ai_provider=ai_provider,
     )
     loop_state = initialize_loop_state(goal.goal_id, len(tasks), phase=phase)
     write_json_file(loop_state_path(base_dir), loop_state.to_dict())
@@ -1821,7 +1862,13 @@ def cli_main(argv: list[str] | None = None) -> int:
         manifest = build_task_manifest(args.base_dir)
         scripts = write_task_scripts(args.base_dir)
         initialize_phase1_status(args.base_dir, enable_ai=args.enable_ai)
-        persist_ai_execution_state(args.base_dir, phase="Phase1", enabled=args.enable_ai, tasks=[])
+        persist_ai_execution_state(
+            args.base_dir,
+            phase="Phase1",
+            enabled=args.enable_ai,
+            tasks=[],
+            ai_provider=args.ai_provider,
+        )
         print(f"Phase1 task tree ready at: {runtime_root(args.base_dir)}")
         if created:
             for path in created:
@@ -1838,7 +1885,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.run_phase1:
-        return run_phase1(args.base_dir, enable_ai=args.enable_ai)
+        return run_phase1(args.base_dir, enable_ai=args.enable_ai, ai_provider=args.ai_provider)
 
     if args.plan:
         goal, tasks, _, memory_state, _ = plan_workflow(
@@ -1847,6 +1894,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             args.project_dir,
             phase="Phase2",
             enable_ai=args.enable_ai,
+            ai_provider=args.ai_provider,
         )
         print_task_plan(goal, tasks, memory_state)
         return 0
@@ -1858,6 +1906,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             args.project_dir,
             phase="Phase2",
             enable_ai=args.enable_ai,
+            ai_provider=args.ai_provider,
         )
 
     if args.run_phase3:
@@ -1867,6 +1916,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             args.project_dir,
             phase="Phase3",
             enable_ai=args.enable_ai,
+            ai_provider=args.ai_provider,
         )
 
     if args.run_phase4:
@@ -1876,6 +1926,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             args.project_dir,
             phase="Phase4",
             enable_ai=args.enable_ai,
+            ai_provider=args.ai_provider,
         )
 
     if args.run_phase5:
@@ -1885,6 +1936,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             args.project_dir,
             phase="Phase5",
             enable_ai=args.enable_ai,
+            ai_provider=args.ai_provider,
         )
 
     if args.report:
@@ -1914,8 +1966,16 @@ def cli_main(argv: list[str] | None = None) -> int:
             args.project_dir,
             phase=target_phase,
             enable_ai=args.enable_ai,
+            ai_provider=args.ai_provider,
         )
-        persist_ai_execution_state(args.base_dir, phase=target_phase, enabled=args.enable_ai, goal=goal, tasks=[])
+        persist_ai_execution_state(
+            args.base_dir,
+            phase=target_phase,
+            enabled=args.enable_ai,
+            goal=goal,
+            tasks=[],
+            ai_provider=args.ai_provider,
+        )
         print_goal_summary(goal)
         print("\nTip: use `--plan`, `--run-phase2`, `--run-phase3`, `--run-phase4`, or `--run-phase5` to continue.")
         return 0

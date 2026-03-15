@@ -210,6 +210,7 @@ def build_project_goal(
     phase: str = "Phase2",
     priority: str = "medium",
     enable_ai: bool = False,
+    ai_provider: str | None = None,
     dependencies: list[str] | None = None,
     enable_memory: bool | None = None,
     state_dir: str | Path | None = None,
@@ -280,6 +281,7 @@ def build_project_goal(
     ]
     if enable_ai:
         notes.append("AI-Phase1 is enabled: AIExecutor routes AI-capable tasks through safe local placeholders.")
+        notes.append("AI-Phase2 provider abstraction is active: provider routing is configurable without changing task structures.")
     notes.extend(lineage["retrieval_notes"])
 
     tags = ["python", "local-analysis", phase.lower(), complexity_level]
@@ -304,7 +306,7 @@ def build_project_goal(
         created_at=utc_now(),
         priority=priority if priority in PRIORITY_SCORES else "medium",
         use_ai=enable_ai,
-        ai_provider="local_placeholder" if enable_ai else "disabled",
+        ai_provider=(ai_provider or "local_placeholder") if enable_ai else "disabled",
         ai_prompt_template="ai_phase1_goal_prompt_v1" if enable_ai else None,
         dependencies=list(dependencies or []),
         notes=notes,

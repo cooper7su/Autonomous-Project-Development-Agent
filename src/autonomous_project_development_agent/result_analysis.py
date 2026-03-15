@@ -279,6 +279,7 @@ def update_task_history(
                 "failure_rate": 0.0,
                 "retry_rate": 0.0,
                 "use_ai": bool(task.use_ai),
+                "last_provider": None,
                 "last_status": None,
                 "last_run_at": None,
                 "last_actual_executor_type": None,
@@ -322,6 +323,7 @@ def update_task_history(
     profile["last_goal_id"] = goal_payload.get("goal_id")
     profile["last_phase"] = goal_payload.get("phase")
     profile["use_ai"] = bool(task.use_ai)
+    profile["last_provider"] = result.ai_metadata.get("provider")
     profile["last_actual_executor_type"] = result.executor_type
     profile["last_requested_executor_type"] = result.requested_executor_type or task.executor_type
 
@@ -483,6 +485,7 @@ def build_final_report(
 
     executor_breakdown: dict[str, int] = {}
     actual_executor_breakdown: dict[str, int] = {}
+    provider_breakdown: dict[str, int] = {}
     duration_series: list[dict[str, Any]] = []
     retry_series: list[dict[str, Any]] = []
     ai_task_count = 0
@@ -492,6 +495,9 @@ def build_final_report(
         executor_breakdown[executor_type] = executor_breakdown.get(executor_type, 0) + 1
         actual_executor_type = record["result"].get("executor_type", executor_type)
         actual_executor_breakdown[actual_executor_type] = actual_executor_breakdown.get(actual_executor_type, 0) + 1
+        provider_name = record["result"].get("ai_metadata", {}).get("provider")
+        if provider_name:
+            provider_breakdown[provider_name] = provider_breakdown.get(provider_name, 0) + 1
         if record["task"].get("use_ai"):
             ai_task_count += 1
         if actual_executor_type == "ai_executor":
@@ -553,12 +559,14 @@ def build_final_report(
             "goal_use_ai": bool(goal_payload.get("use_ai", False)),
             "ai_task_count": ai_task_count,
             "ai_executed_task_count": ai_executed_task_count,
+            "provider_breakdown": provider_breakdown,
         },
         "dependency_edges": plan_payload.get("dependency_edges", []),
         "duration_series": duration_series,
         "retry_series": retry_series,
         "executor_breakdown": executor_breakdown,
         "actual_executor_breakdown": actual_executor_breakdown,
+        "provider_breakdown": provider_breakdown,
         "memory_overview": {
             "goal_count": memory_state.get("goal_count", 0),
             "vector_count": memory_state.get("vector_count", 0),
@@ -599,6 +607,7 @@ def build_final_report(
             "average_confidence_score": average_confidence,
             "executor_breakdown": executor_breakdown,
             "actual_executor_breakdown": actual_executor_breakdown,
+            "provider_breakdown": provider_breakdown,
             "completed_batches": loop_state_payload.get("completed_batches", 0),
             "parallel_task_count": plan_payload.get("parallel_task_count", 0),
             "ai_task_count": ai_task_count,

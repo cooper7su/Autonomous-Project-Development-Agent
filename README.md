@@ -12,6 +12,10 @@ autonomous project workflow. The repository now includes:
   richer analysis, and a review-oriented autonomous reporting loop
 - Phase5: local task history, heuristic planning, self-optimization, richer
   memory browsing, and local-only autonomous execution without external AI APIs
+- AI-Phase1: a switchable `AIExecutor`, `use_ai` goal/task flags, and AI-aware
+  CLI and dashboard state
+- AI-Phase2: provider abstraction through local placeholder and OpenAI-ready
+  provider interfaces without enabling live network execution
 
 The current implementation remains intentionally conservative:
 
@@ -117,6 +121,8 @@ Available commands:
 - `--run-phase5`: execute the Phase5 autonomous workflow with local memory, heuristic planning, and self-optimization.
 - `--memory-status`: show stored goal memory and vector-store placeholder state.
 - `--memory-query`: query historical goal, task, and workflow memory using local matching rules.
+- `--enable-ai`: route AI-capable tasks through `AIExecutor` using safe local placeholder behavior.
+- `--ai-provider`: choose the provider route for `--enable-ai`, such as `local_placeholder` or `openai`.
 - `--visualize`: launch the Streamlit dashboard.
 - `--report`: show the latest Phase2, Phase3, Phase4, or Phase5 execution report.
 
@@ -126,11 +132,14 @@ Examples:
 python -m autonomous_project_development_agent --init
 python -m autonomous_project_development_agent --status
 python -m autonomous_project_development_agent --run-phase1
+python -m autonomous_project_development_agent --run-phase1 --enable-ai --ai-provider local_placeholder
 python -m autonomous_project_development_agent --goal "Read a local project directory, generate a module list, count Python files, and output a preliminary analysis report." --plan
 python -m autonomous_project_development_agent --goal "Read a local project directory, generate a module list, count Python files, and output a preliminary analysis report." --run-phase2
+python -m autonomous_project_development_agent --goal "Read a local project directory, generate a module list, count Python files, and output a preliminary analysis report." --run-phase2 --enable-ai --ai-provider openai
 python -m autonomous_project_development_agent --goal "Inspect a local project, build a reusable module inventory, compute Python file metrics, and generate a safe autonomous implementation suggestion." --run-phase3
 python -m autonomous_project_development_agent --goal "Inspect a local project, recover relevant historical context, generate a dependency-aware task tree, prepare safe autonomous implementation suggestions, and produce an iteration review package." --run-phase4
 python -m autonomous_project_development_agent --goal "Inspect a local project, reuse historical memory, generate a self-optimizing task tree, execute safe local analysis tasks, and produce a local autonomy review without external AI APIs." --run-phase5
+python -m autonomous_project_development_agent --goal "Inspect a local project, reuse historical memory, generate a self-optimizing task tree, execute safe local analysis tasks, and produce a local autonomy review with AI placeholder routing." --run-phase5 --enable-ai --ai-provider local_placeholder
 python -m autonomous_project_development_agent --memory-status
 python -m autonomous_project_development_agent --memory-query --goal "phase5"
 python -m autonomous_project_development_agent --visualize
@@ -150,6 +159,7 @@ The Streamlit view displays:
 - module map
 - Phase1 task tree and latest Phase1 status
 - latest Phase2 to Phase5 goal, plan, loop state, logs, and final report
+- AI execution state, provider status, and AI-capable task routing
 - memory placeholder state, historical goal browsing, task history, workflow history, and visualization summary payloads
 
 It remains lightweight, but now supports simple browsing interactions for

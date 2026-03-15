@@ -1,4 +1,4 @@
-"""Package metadata and shared constants for Phase1 to Phase5 plus AI-Phase1."""
+"""Package metadata and shared constants for Phase1 to Phase5 plus AI phases."""
 
 APP_NAME = "Autonomous Project Development Agent"
 PACKAGE_NAME = "autonomous_project_development_agent"
@@ -21,7 +21,7 @@ DEFAULT_PHASE5_GOAL = (
     "task tree, execute safe local analysis tasks, and produce a local autonomy "
     "review without external AI APIs."
 )
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 PHASE1_MODULE_MAP = [
     (
@@ -53,6 +53,7 @@ PLACEHOLDER_LOGS = [
     "Result analysis placeholder loaded: no scoring or regression checks are active yet.",
     "Loop control placeholder loaded: no autonomous retry policy is active yet.",
     "AI-Phase1 adds a safe AIExecutor boundary that can be enabled with --enable-ai.",
+    "AI-Phase2 adds provider abstraction so AI placeholder routing is decoupled from provider selection.",
 ]
 
 PHASE1_TASK_BLUEPRINTS = [
